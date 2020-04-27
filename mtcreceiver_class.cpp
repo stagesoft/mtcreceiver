@@ -12,6 +12,7 @@
 // Initializing static class members
 bool MtcReceiver::isTimecodeRunning = false;
 double MtcReceiver::mtcHead = 0;
+unsigned char MtcReceiver::curFrameRate = 25;
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
@@ -242,6 +243,7 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// We have complete valid MTC time info so, we can update 
 		// our MTC head position
 		mtcHead = curFrame.toSeconds() * 1000;
+		curFrameRate = curFrame.getFps();
 
 		// ofLogVerbose("ofxMidiTimecode") << frame.toString();
 

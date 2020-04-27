@@ -76,7 +76,7 @@ struct MtcFrame {
 	int minutes = 0; //< minutes 0-59
 	int seconds = 0; //< seconds 0-59
 	int frames = 0;  //< frames 0-29 (depending on framerate)
-	unsigned char rate = MtcFrameRate::FR_30; //< 0x0: 24, 0x1: 25, 0x2: 29.97, 0x3: 30
+	unsigned char rate = MtcFrameRate::FR_25; //< 0x0: 24, 0x1: 25, 0x2: 29.97, 0x3: 30
 
 	// Get the framerate value in fps
 	double getFps( void ) const;
@@ -104,6 +104,7 @@ class MtcReceiver : public RtMidiIn
         // Stream control vars
         static bool isTimecodeRunning;      // Is the timecode sync running?
         static double mtcHead;              // Time code head in milliseconds
+        static unsigned char curFrameRate;  // Current MTC frame rate
 
     private:
         // MIDI TIMECODE DATA
