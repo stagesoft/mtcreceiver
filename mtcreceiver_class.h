@@ -101,16 +101,17 @@ struct MtcFrame {
 	unsigned char rate = MtcFrameRate::FR_25; //< 0x0: 24, 0x1: 25, 0x2: 29.97, 0x3: 30
 
 	// Get the framerate value in fps
-	double getFps( void ) const;
+	float getFps( void ) const;
 	// Convert to a string: hh:mm:ss:ff
 	std::string toString( void ) const;
 	// Convert to time in seconds
-	double toSeconds( void ) const;
+	long int toSeconds( void ) const;
+	// Convert to time in milliseconds, more precise
+    long int toMilliseconds() const;
 	// Convert from time in seconds
-	void fromSeconds( double s );
+	void fromSeconds( long int s );
 	// Convert from milliseconds to frames due to a given rate
-    int msToFrames( double ms );
-
+    long int msToFrames( long int ms );
 };
 
 class MtcReceiver : public RtMidiIn
@@ -125,13 +126,13 @@ class MtcReceiver : public RtMidiIn
 
         // Stream control vars
         static bool isTimecodeRunning;      // Is the timecode sync running?
-        static double mtcHead;              // Time code head in milliseconds
+        static long int mtcHead;              // Time code head in milliseconds
         static unsigned char curFrameRate;  // Current MTC frame rate
 
     private:
         // MIDI TIMECODE DATA
         // ofxMidiTimecode timecode;        // Timecode message parser
-        double timecodeTimestamp = 0;       // When last quarter frame message was received
+        long int timecodeTimestamp = 0;       // When last quarter frame message was received
         MtcFrame curFrame;                  // Timecode frame data, ie. H M S frame rate
         MtcFrame quarterFrame;              // Last quarter frame received
         int direction = 0;                  // Direction indicator

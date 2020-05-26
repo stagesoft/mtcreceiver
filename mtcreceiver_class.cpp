@@ -33,7 +33,7 @@
 ////////////////////////////////////////////
 // Initializing static class members
 bool MtcReceiver::isTimecodeRunning = false;
-double MtcReceiver::mtcHead = 0;
+long int MtcReceiver::mtcHead = 0;
 unsigned char MtcReceiver::curFrameRate = 25;
 
 //////////////////////////////////////////////////////////
@@ -83,35 +83,50 @@ std::string MtcFrame::toString() const {
 }
 
 //////////////////////////////////////////////////////////
-double MtcFrame::toSeconds() const {
-	double time = (double)hours * 3600.0;
-	time += (double)minutes * 60.0;
-	time += (double)seconds;
-	time += (double)frames / getFps();
+long int MtcFrame::toSeconds() const {
+	long int time = hours * 3600.0;
+	time += minutes * 60.0;
+	time += seconds;
+	time += frames / getFps();
 	return time;
 }
 
 //////////////////////////////////////////////////////////
-void MtcFrame::fromSeconds( double s ) {
+long int MtcFrame::toMilliseconds() const {
+	double time = hours * 3600.0;
+	time += minutes * 60.0;
+	time += seconds;
+	time += frames / getFps();
+	time *= 1000;
+	return (long int) time;
+}
+
+//////////////////////////////////////////////////////////
+void MtcFrame::fromSeconds( long int s ) {
 
 	seconds = (int)s % 60;
 	minutes = (int)( (s - seconds) * (1 / 60) ) % 60;
 	hours = (int)(s * (1 / 3600) ) % 60;
 
 	// round fractional part of seconds for ms
-	double ms = (int)(floor((s - floor(s)) * 1000.0) + 0.5);
+	long int ms = (int)(floor((s - floor(s)) * 1000.0) + 0.5);
 	frames = msToFrames(ms);
 
 	// rate = r; // Don't know why is this here
 }
 
 //////////////////////////////////////////////////////////
-int MtcFrame::msToFrames( double ms ) {
-	return (int)( (double)ms / ( getFps() / 1000.0) );
+long int MtcFrame::msToFrames( long int ms ) {
+	return ( ms / ( getFps() / 1000.0) );
 }
 
 //////////////////////////////////////////////////////////
-double MtcFrame::getFps( void ) const {
+float MtcFrame::getFps( void ) const {
+	// NOTE: this function returns a float due to the decimals
+	// in the 29.97 mode, it could be that this value is somewhere
+	// truncated... 
+	// TO DO : 	review it carefully in the future to avoid problems
+	// 			in different calculus using this function
 	switch ( rate ) {
 		case FR_24:
 			return 24;
@@ -128,7 +143,7 @@ double MtcFrame::getFps( void ) const {
 }
 
 //////////////////////////////////////////////////////////
-// Midi callback - Static member function
+// RtMidi callback - Static member function
 void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *m, void * data )
 {
 	/*
@@ -264,7 +279,7 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 
 		// We have complete valid MTC time info so, we can update 
 		// our MTC head position
-		mtcHead = curFrame.toSeconds() * 1000;
+		mtcHead = curFrame.toMilliseconds();
 		curFrameRate = curFrame.getFps();
 
 		// ofLogVerbose("ofxMidiTimecode") << frame.toString();
@@ -297,7 +312,7 @@ bool MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 
 		// A full message is always valid qhole MTC time info so
 		// we can update our MTC head position
-		mtcHead = curFrame.toSeconds() * 1000;
+		mtcHead = curFrame.toMilliseconds();
 
 		// ofLogVerbose("ofxMidiTimecode") << frame.toString();
 
@@ -328,9 +343,9 @@ bool MtcReceiver::decodeNewMidiMessage( std::vector<unsigned char> &message ) {
 void MtcReceiver::threadedChecker( void ) {
 	while ( checkerOn ) {
 		if ( isTimecodeRunning ) {
-			double timecodeNow = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
+			long int timecodeNow = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
 			
-			double timecodeDiff =  (timecodeNow - timecodeTimestamp) / 1E6;
+			long int timecodeDiff =  (timecodeNow - timecodeTimestamp) / 1E6;
 
 			if ( timecodeDiff > 50 ) {
 				isTimecodeRunning = false;
@@ -339,8 +354,6 @@ void MtcReceiver::threadedChecker( void ) {
 		}
 
 		std::this_thread::sleep_for( std::chrono::milliseconds(20) );
-		// std::cout << curFrame.toString() << endl;
-		// std::cout << setw(20) << setfill('0') << mtcHead << endl;
 
 	}
 }
