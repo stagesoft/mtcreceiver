@@ -208,7 +208,13 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 			direction = -1;
 		}
 	}
-	
+
+	// Each time we process a quarter we assume that the head is
+	// stil going on...
+	// TO DO : adjust for both directions
+	// 1/4 * 1000 milliseconds * (1 / framerate)
+	mtcHead += 250 / curFrame.getFps();
+
     // Updateing lastDataByte flag
     lastDataByte = dataByte;
 
