@@ -28,8 +28,8 @@
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
 
-#ifndef MTCRECEIVER_CLASS_H
-#define MTCRECEIVER_CLASS_H
+#ifndef MTCRECEIVER_H
+#define MTCRECEIVER_H
 
 //////////////////////////////////////////////////////////
 // Preprocessor definitions
@@ -155,4 +155,4 @@ class MtcReceiver : public RtMidiIn
 
 };
 
-#endif // MTCRECEIVER_CLASS_H
+#endif // MTCRECEIVER_H
