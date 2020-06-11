@@ -23,13 +23,13 @@
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
-// Stage Lab SysQ MTC receiver class header file
+// Stage Lab Cuems MTC receiver class header file
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////
 
-#ifndef MTCRECEIVER_CLASS_H
-#define MTCRECEIVER_CLASS_H
+#ifndef MTCRECEIVER_H
+#define MTCRECEIVER_H
 
 //////////////////////////////////////////////////////////
 // Preprocessor definitions
@@ -118,11 +118,9 @@ class MtcReceiver : public RtMidiIn
 {
     public:
         MtcReceiver(    RtMidi::Api api = LINUX_ALSA,
-                        const std::string& clientName = "SysQ Mtc Receiver",
+                        const std::string& clientName = "Cuems Mtc Receiver",
                         unsigned int queueSizeLimit = 100 );
         ~MtcReceiver( void );
-
-        // RtMidiIn midi; // = { RtMidi::Api::LINUX_ALSA, "SysQ audioplayer", 100 };
 
         // Stream control vars
         static bool isTimecodeRunning;      // Is the timecode sync running?
@@ -155,4 +153,4 @@ class MtcReceiver : public RtMidiIn
 
 };
 
-#endif // MTCRECEIVER_CLASS_H
+#endif // MTCRECEIVER_H
