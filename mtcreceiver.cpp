@@ -43,9 +43,9 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 							RtMidiIn( api, clientName, queueSizeLimit ) {
     // Check for midi ports available
     if ( RtMidiIn::getPortCount() == 0 ) {
-        std::cerr << "No midi ports found.\n";
+		CuemsLogger::getLogger()->logError("No midi ports found.");
 
-        exit(EXIT_FAILURE);
+        exit(CUEMS_EXIT_NO_MIDI_PORTS_FOUND);
     }
 
 	// Set and detach our threaded checker loop
@@ -146,13 +146,6 @@ float MtcFrame::getFps( void ) const {
 // RtMidi callback - Static member function
 void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *m, void * data )
 {
-	/*
-	int i;
-	for ( i = 0 ; i < (int)m->size(); i++ )
-		std::cout << "Byte :" << i << " Value :0x"  << setfill('0') << setw(2) << hex << (int)m->at(i) << " ";
-	std::cout << "Size:" << i << " Deltatime->" << deltatime << std::endl;
-	*/
-
     MtcReceiver *mtcr = (MtcReceiver*) data;
     std::vector< unsigned char > message = *m;
 
@@ -169,11 +162,7 @@ void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *
     // So, we have a new mide message and we check whether it is time
     // information and in that case store it in our current frame and 
     // quarter frame data structures
-    if ( mtcr->decodeNewMidiMessage(message) )
-    {
-		// std::cout << std::scientific << mtcHead << endl;
-
-    }
+    mtcr->decodeNewMidiMessage(message);
 }
 
 //////////////////////////////////////////////////////////
@@ -188,8 +177,6 @@ bool MtcReceiver::isFullFrame(std::vector<unsigned char> &message) {
 
 //////////////////////////////////////////////////////////
 bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
-
-	// ofLogVerbose("ofxMidiTimecode") << "Quarter Frame " << ofxMidi::bytesToString(message);
 
 	bool complete = false;
 	unsigned char dataByte = message[1];
@@ -288,15 +275,11 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		mtcHead = curFrame.toMilliseconds();
 		curFrameRate = curFrame.getFps();
 
-		// ofLogVerbose("ofxMidiTimecode") << frame.toString();
-
 		// Reset quarter frame structure and detection flags
 		quarterFrame = MtcFrame();
 		direction = 0;
 		qfCount = 0;
 		lastQFlag = firstQFlag = false;
-
-		// std::cout << curFrame.toString() << "\r";
 
 		return true;
 	}
@@ -308,8 +291,6 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 bool MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 	if(message.size() == FF_LEN && isFullFrame(message)) {
 
-		// ofLogVerbose("ofxMidiTimecode") << "Full Frame " << ofxMidi::bytesToString(message);
-
 		curFrame.hours = (int)(message[5] & 0x1F);
 		curFrame.rate = (int)((message[5] & 0x60) >> 5);
 		curFrame.minutes = (int)(message[6]);
@@ -319,8 +300,6 @@ bool MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		// A full message is always valid qhole MTC time info so
 		// we can update our MTC head position
 		mtcHead = curFrame.toMilliseconds();
-
-		// ofLogVerbose("ofxMidiTimecode") << frame.toString();
 
 		return true;
 	}

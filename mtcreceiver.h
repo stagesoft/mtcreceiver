@@ -33,9 +33,7 @@
 
 //////////////////////////////////////////////////////////
 // Preprocessor definitions
-// #define TIXML_USE_STL
 // #define __LINUX_ALSA__
-// #define __UNIX_JACK__
 
 #define FF_LEN 10
 #define QF_LEN 8
@@ -48,6 +46,8 @@
 #include <iostream>
 #include <iomanip>
 #include <rtmidi/RtMidi.h>
+#include "../cuemslogger/cuemslogger.h"
+#include "../cuems_errors.h"
 
 using namespace std;
 
