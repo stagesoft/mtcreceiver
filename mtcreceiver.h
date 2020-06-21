@@ -142,8 +142,8 @@ class MtcReceiver : public RtMidiIn
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );
         bool isFullFrame( std::vector<unsigned char> &message );
-        bool decodeFullFrame( std::vector<unsigned char> &message );
-        bool decodeQuarterFrame( std::vector<unsigned char> &message) ;
+        void decodeFullFrame( std::vector<unsigned char> &message );
+        void decodeQuarterFrame( std::vector<unsigned char> &message) ;
 
         // RtMidi callback function
         static void midiCallback( double deltatime, std::vector< unsigned char > *message, void *data );

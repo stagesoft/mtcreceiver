@@ -65,10 +65,8 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 
 //////////////////////////////////////////////////////////
 MtcReceiver::~MtcReceiver( void ) {
-
 	checkerOn = false;
     RtMidiIn::closePort();
-
 }
 
 //////////////////////////////////////////////////////////
@@ -79,7 +77,6 @@ std::string MtcFrame::toString() const {
 	       << std::setw(2) << std::setfill('0') << seconds << ":"
 	       << std::setw(2) << std::setfill('0') << frames;
 	return stream.str();
-
 }
 
 //////////////////////////////////////////////////////////
@@ -103,7 +100,6 @@ long int MtcFrame::toMilliseconds() const {
 
 //////////////////////////////////////////////////////////
 void MtcFrame::fromSeconds( long int s ) {
-
 	seconds = (int)s % 60;
 	minutes = (int)( (s - seconds) * (1 / 60) ) % 60;
 	hours = (int)(s * (1 / 3600) ) % 60;
@@ -111,8 +107,6 @@ void MtcFrame::fromSeconds( long int s ) {
 	// round fractional part of seconds for ms
 	long int ms = (int)(floor((s - floor(s)) * 1000.0) + 0.5);
 	frames = msToFrames(ms);
-
-	// rate = r; // Don't know why is this here
 }
 
 //////////////////////////////////////////////////////////
@@ -138,23 +132,19 @@ float MtcFrame::getFps( void ) const {
 		default:
 			return 30;
 	}
-
-	return 0;
 }
 
 //////////////////////////////////////////////////////////
 // RtMidi callback - Static member function
-void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *m, void * data )
-{
+void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *m, void * data ) {
     MtcReceiver *mtcr = (MtcReceiver*) data;
     std::vector< unsigned char > message = *m;
 
 	// First of all just a small message time gap check
-	if ( deltatime > 0.10 ) {
+	if ( deltatime > 0.10 )
 		mtcr->isTimecodeRunning = false;
-	} else {
+	else 
 		mtcr->isTimecodeRunning = true;
-	}
 
 	// Then we note down the timestamp when last midi message arrived
 	mtcr->timecodeTimestamp = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -168,16 +158,16 @@ void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *
 //////////////////////////////////////////////////////////
 bool MtcReceiver::isFullFrame(std::vector<unsigned char> &message) {
 	return
-		(message[1] == 0x7F) && // universal message
-		(message[2] == 0x7F) && // global broadcast
-		(message[3] == 0x01) && // time code
-		(message[4] == 0x01) && // full frame
-		(message[9] == 0xF7);   // end of sysex
+		(message.size() == FF_LEN) && 	// Message length is right
+		(message[1] == 0x7F) && 		// universal message
+		(message[2] == 0x7F) && 		// global broadcast
+		(message[3] == 0x01) && 		// time code
+		(message[4] == 0x01) && 		// full frame
+		(message[9] == 0xF7);   		// end of sysex
 }
 
 //////////////////////////////////////////////////////////
-bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
-
+void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	bool complete = false;
 	unsigned char dataByte = message[1];
 	unsigned char msgType = dataByte & 0xF0;
@@ -258,7 +248,7 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 			}
 			break;
 		default:
-			return false;
+			return;
 	}
 
 	// Update time using the (hopefully) complete message
@@ -280,45 +270,34 @@ bool MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		direction = 0;
 		qfCount = 0;
 		lastQFlag = firstQFlag = false;
-
-		return true;
 	}
-
-	return false;
 }
 
 //////////////////////////////////////////////////////////
-bool MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
-	if(message.size() == FF_LEN && isFullFrame(message)) {
+void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
+	curFrame.hours = (int)(message[5] & 0x1F);
+	curFrame.rate = (int)((message[5] & 0x60) >> 5);
+	curFrame.minutes = (int)(message[6]);
+	curFrame.seconds = (int)(message[7]);
+	curFrame.frames = (int)(message[8]);
 
-		curFrame.hours = (int)(message[5] & 0x1F);
-		curFrame.rate = (int)((message[5] & 0x60) >> 5);
-		curFrame.minutes = (int)(message[6]);
-		curFrame.seconds = (int)(message[7]);
-		curFrame.frames = (int)(message[8]);
-
-		// A full message is always valid qhole MTC time info so
-		// we can update our MTC head position
-		mtcHead = curFrame.toMilliseconds();
-
-		return true;
-	}
-	return false;
+	// A full message is always valid qhole MTC time info so
+	// we can update our MTC head position
+	mtcHead = curFrame.toMilliseconds();
 }
 
 //////////////////////////////////////////////////////////
 bool MtcReceiver::decodeNewMidiMessage( std::vector<unsigned char> &message ) {
-
-	unsigned char statusByte = message[0];
-
     // Is it a time codification frame??
-	if( statusByte == MIDI_TIME_CODE ) {
-        // A quarter frame?
-		return decodeQuarterFrame(message);
+	if( message[0] == MIDI_TIME_CODE ) {
+        // A MTC quarter frame?
+		decodeQuarterFrame(message);
+		return true;
 	}
-	else if( statusByte == MIDI_SYSEX ) {
-        // A full frame?
-        return decodeFullFrame(message);
+	else if( message[0] == MIDI_SYSEX && isFullFrame(message) ) {
+        // A SysEx full frame?
+        decodeFullFrame(message);
+		return true;
 	}
 
     return false;
@@ -332,14 +311,11 @@ void MtcReceiver::threadedChecker( void ) {
 			
 			long int timecodeDiff =  (timecodeNow - timecodeTimestamp) / 1E6;
 
-			if ( timecodeDiff > 50 ) {
+			if ( timecodeDiff > 50 )
 				isTimecodeRunning = false;
-
-			}
 		}
 
 		std::this_thread::sleep_for( std::chrono::milliseconds(20) );
-
 	}
 }
 
