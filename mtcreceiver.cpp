@@ -57,9 +57,17 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 
     // Don't ignore sysex, timing, or active sensing messages
     RtMidiIn::ignoreTypes( false, false, false );
+	CuemsLogger::getLogger()->logError("going to open midi port");
 
     // Then, at last, open midi default port
     RtMidiIn::openPort( 0 );
+
+	if (!RtMidiIn::isPortOpen()){
+		CuemsLogger::getLogger()->logError("first try to open midi port failder, triying again");
+		RtMidiIn::openPort( 0 );
+
+	}
+
 
 }
 
