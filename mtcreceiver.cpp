@@ -35,6 +35,7 @@
 bool MtcReceiver::isTimecodeRunning = false;
 long int MtcReceiver::mtcHead = 0;
 unsigned char MtcReceiver::curFrameRate = 25;
+bool MtcReceiver::wasLastUpdateFullFrame = false;
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
@@ -171,7 +172,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	bool complete = false;
 	unsigned char dataByte = message[1];
 	unsigned char msgType = dataByte & 0xF0;
-
+	
 	if(direction == 0 && qfCount > 1) {
 		// If not set direction and we are already counting quarters...
 		// let's update the last message type flag
@@ -264,6 +265,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// our MTC head position
 		mtcHead = curFrame.toMilliseconds();
 		curFrameRate = curFrame.getFps();
+		wasLastUpdateFullFrame = false; // Quarter-frame update (not full SYSEX)
 
 		// Reset quarter frame structure and detection flags
 		quarterFrame = MtcFrame();
@@ -284,6 +286,8 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 	// A full message is always valid qhole MTC time info so
 	// we can update our MTC head position
 	mtcHead = curFrame.toMilliseconds();
+	wasLastUpdateFullFrame = true; // Full SYSEX frame marker (like xjadeo's tick=0)
+	                                // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
 }
 
 //////////////////////////////////////////////////////////
