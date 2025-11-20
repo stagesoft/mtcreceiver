@@ -145,12 +145,16 @@ class MtcReceiver : public RtMidiIn
         static unsigned char curFrameRate;  // Current MTC frame rate
         static bool wasLastUpdateFullFrame; // true if last update was full SYSEX frame (for seeking)
                                            // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
+        
+        // Get current MTC frame (like xjadeo's timecode state)
+        // Returns the current timecode frame structure (h, m, s, f, rate)
+        static MtcFrame getCurFrame();
 
     private:
         // MIDI TIMECODE DATA
         // ofxMidiTimecode timecode;        // Timecode message parser
         long int timecodeTimestamp = 0;       // When last quarter frame message was received
-        MtcFrame curFrame;                  // Timecode frame data, ie. H M S frame rate
+        static MtcFrame curFrame;            // Timecode frame data, ie. H M S frame rate (static like mtcHead)
         MtcFrame quarterFrame;              // Last quarter frame received
         int direction = 0;                  // Direction indicator
         unsigned int lastDataByte = 0x00;   // Last quarter received data byte, to recognize dir

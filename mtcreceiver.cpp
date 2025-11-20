@@ -36,6 +36,13 @@ bool MtcReceiver::isTimecodeRunning = false;
 long int MtcReceiver::mtcHead = 0;
 unsigned char MtcReceiver::curFrameRate = 25;
 bool MtcReceiver::wasLastUpdateFullFrame = false;
+MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
+
+//////////////////////////////////////////////////////////
+// Get current MTC frame (like xjadeo's timecode state)
+MtcFrame MtcReceiver::getCurFrame() {
+    return curFrame;
+}
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
