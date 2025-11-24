@@ -150,9 +150,9 @@ void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *
 
 	// First of all just a small message time gap check
 	if ( deltatime > 0.10 )
-		mtcr->isTimecodeRunning = false;
+		mtcr->isTimecodeRunning.store(false);
 	else 
-		mtcr->isTimecodeRunning = true;
+		mtcr->isTimecodeRunning.store(true);
 
 	// Then we note down the timestamp when last midi message arrived
 	mtcr->timecodeTimestamp = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
@@ -198,7 +198,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	// stil going on...
 	// TO DO : adjust for both directions
 	// 1/4 * 1000 milliseconds * (1 / framerate)
-	mtcHead += 250 / curFrame.getFps();
+	mtcHead.store(mtcHead.load() + 250 / curFrame.getFps());
 
     // Updateing lastDataByte flag
     lastDataByte = dataByte;
@@ -270,8 +270,8 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 
 		// We have complete valid MTC time info so, we can update 
 		// our MTC head position
-		mtcHead = curFrame.toMilliseconds();
-		curFrameRate = curFrame.getFps();
+		mtcHead.store(curFrame.toMilliseconds());
+		curFrameRate.store(curFrame.getFps());
 
 		// Reset quarter frame structure and detection flags
 		quarterFrame = MtcFrame();
@@ -291,7 +291,7 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 
 	// A full message is always valid qhole MTC time info so
 	// we can update our MTC head position
-	mtcHead = curFrame.toMilliseconds();
+	mtcHead.store(curFrame.toMilliseconds());
 }
 
 //////////////////////////////////////////////////////////
@@ -314,13 +314,13 @@ bool MtcReceiver::decodeNewMidiMessage( std::vector<unsigned char> &message ) {
 //////////////////////////////////////////////////////////
 void MtcReceiver::threadedChecker( void ) {
 	while ( checkerOn ) {
-		if ( isTimecodeRunning ) {
+		if ( isTimecodeRunning.load() ) {
 			long int timecodeNow = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
 			
 			long int timecodeDiff =  (timecodeNow - timecodeTimestamp) / 1E6;
 
 			if ( timecodeDiff > 50 )
-				isTimecodeRunning = false;
+				isTimecodeRunning.store(false);
 		}
 
 		std::this_thread::sleep_for( std::chrono::milliseconds(20) );
