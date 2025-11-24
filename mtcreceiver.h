@@ -123,9 +123,10 @@ class MtcReceiver : public RtMidiIn
         ~MtcReceiver( void );
 
         // Stream control vars
-        static bool isTimecodeRunning;      // Is the timecode sync running?
-        static long int mtcHead;              // Time code head in milliseconds
-        static unsigned char curFrameRate;  // Current MTC frame rate
+        // These are accessed from both MIDI and audio callback threads, so must be atomic
+        static std::atomic<bool> isTimecodeRunning;      // Is the timecode sync running?
+        static std::atomic<long int> mtcHead;              // Time code head in milliseconds
+        static std::atomic<unsigned char> curFrameRate;  // Current MTC frame rate
 
     private:
         // MIDI TIMECODE DATA

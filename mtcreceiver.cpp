@@ -32,9 +32,9 @@
 
 ////////////////////////////////////////////
 // Initializing static class members
-bool MtcReceiver::isTimecodeRunning = false;
-long int MtcReceiver::mtcHead = 0;
-unsigned char MtcReceiver::curFrameRate = 25;
+std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
+std::atomic<long int> MtcReceiver::mtcHead(0);
+std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
