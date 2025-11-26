@@ -46,8 +46,25 @@
 #include <iostream>
 #include <iomanip>
 #include <rtmidi/RtMidi.h>
+#ifdef HAVE_CUEMS_LOGGER
 #include "../cuemslogger/cuemslogger.h"
 #include "../cuems_errors.h"
+#else
+// Stub logger for standalone use
+namespace CuemsLogger {
+    class Logger {
+    public:
+        static Logger* getLogger() { static Logger instance; return &instance; }
+        void logError(const std::string& msg) { std::cerr << "[ERROR] " << msg << std::endl; }
+        void logWarning(const std::string& msg) { std::cerr << "[WARNING] " << msg << std::endl; }
+        void logInfo(const std::string& msg) { std::cout << "[INFO] " << msg << std::endl; }
+    };
+    // Static function to match cuemslogger API
+    inline Logger* getLogger() { return Logger::getLogger(); }
+}
+// Stub error code
+#define CUEMS_EXIT_NO_MIDI_PORTS_FOUND 1
+#endif
 
 using namespace std;
 
@@ -127,12 +144,18 @@ class MtcReceiver : public RtMidiIn
         static std::atomic<bool> isTimecodeRunning;      // Is the timecode sync running?
         static std::atomic<long int> mtcHead;              // Time code head in milliseconds
         static std::atomic<unsigned char> curFrameRate;  // Current MTC frame rate
+        static bool wasLastUpdateFullFrame; // true if last update was full SYSEX frame (for seeking)
+                                           // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
+        
+        // Get current MTC frame (like xjadeo's timecode state)
+        // Returns the current timecode frame structure (h, m, s, f, rate)
+        static MtcFrame getCurFrame();
 
     private:
         // MIDI TIMECODE DATA
         // ofxMidiTimecode timecode;        // Timecode message parser
         long int timecodeTimestamp = 0;       // When last quarter frame message was received
-        MtcFrame curFrame;                  // Timecode frame data, ie. H M S frame rate
+        static MtcFrame curFrame;            // Timecode frame data, ie. H M S frame rate (static like mtcHead)
         MtcFrame quarterFrame;              // Last quarter frame received
         int direction = 0;                  // Direction indicator
         unsigned int lastDataByte = 0x00;   // Last quarter received data byte, to recognize dir

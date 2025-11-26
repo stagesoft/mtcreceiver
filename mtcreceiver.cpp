@@ -32,6 +32,14 @@
 
 ////////////////////////////////////////////
 // Initializing static class members
+bool MtcReceiver::wasLastUpdateFullFrame = false;
+MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
+
+//////////////////////////////////////////////////////////
+// Get current MTC frame (like xjadeo's timecode state)
+MtcFrame MtcReceiver::getCurFrame() {
+    return curFrame;
+}
 std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
 std::atomic<long int> MtcReceiver::mtcHead(0);
 std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
@@ -179,7 +187,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	bool complete = false;
 	unsigned char dataByte = message[1];
 	unsigned char msgType = dataByte & 0xF0;
-
+	
 	if(direction == 0 && qfCount > 1) {
 		// If not set direction and we are already counting quarters...
 		// let's update the last message type flag
@@ -272,6 +280,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// our MTC head position
 		mtcHead.store(curFrame.toMilliseconds());
 		curFrameRate.store(curFrame.getFps());
+		wasLastUpdateFullFrame = false; // Quarter-frame update (not full SYSEX)
 
 		// Reset quarter frame structure and detection flags
 		quarterFrame = MtcFrame();
@@ -291,6 +300,8 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 
 	// A full message is always valid qhole MTC time info so
 	// we can update our MTC head position
+	wasLastUpdateFullFrame = true; // Full SYSEX frame marker (like xjadeo's tick=0)
+	                                // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
 	mtcHead.store(curFrame.toMilliseconds());
 }
 
