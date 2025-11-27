@@ -32,6 +32,9 @@
 
 ////////////////////////////////////////////
 // Initializing static class members
+std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
+std::atomic<long int> MtcReceiver::mtcHead(0);
+std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 bool MtcReceiver::wasLastUpdateFullFrame = false;
 MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
 
@@ -40,9 +43,6 @@ MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
 MtcFrame MtcReceiver::getCurFrame() {
     return curFrame;
 }
-std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
-std::atomic<long int> MtcReceiver::mtcHead(0);
-std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
@@ -65,13 +65,13 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 
     // Don't ignore sysex, timing, or active sensing messages
     RtMidiIn::ignoreTypes( false, false, false );
-	CuemsLogger::getLogger()->logError("going to open midi port");
+	CuemsLogger::getLogger()->logInfo("going to open midi port");
 
     // Then, at last, open midi default port
     RtMidiIn::openPort( 0 );
 
 	if (!RtMidiIn::isPortOpen()){
-		CuemsLogger::getLogger()->logError("first try to open midi port failder, triying again");
+		CuemsLogger::getLogger()->logWarning("first try to open midi port failed, trying again");
 		RtMidiIn::openPort( 0 );
 
 	}
@@ -300,9 +300,9 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 
 	// A full message is always valid qhole MTC time info so
 	// we can update our MTC head position
+	mtcHead.store(curFrame.toMilliseconds());
 	wasLastUpdateFullFrame = true; // Full SYSEX frame marker (like xjadeo's tick=0)
 	                                // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
-	mtcHead.store(curFrame.toMilliseconds());
 }
 
 //////////////////////////////////////////////////////////
