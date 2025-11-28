@@ -32,17 +32,23 @@
 
 ////////////////////////////////////////////
 // Initializing static class members
+std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
+std::atomic<long int> MtcReceiver::mtcHead(0);
+std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 bool MtcReceiver::wasLastUpdateFullFrame = false;
 MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
+
+// Helper function - use steady_clock for monotonic time
+static long int ns_now() {
+  return chrono::duration_cast<chrono::nanoseconds>(
+      chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 //////////////////////////////////////////////////////////
 // Get current MTC frame (like xjadeo's timecode state)
 MtcFrame MtcReceiver::getCurFrame() {
     return curFrame;
 }
-std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
-std::atomic<long int> MtcReceiver::mtcHead(0);
-std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
@@ -65,18 +71,16 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 
     // Don't ignore sysex, timing, or active sensing messages
     RtMidiIn::ignoreTypes( false, false, false );
-	CuemsLogger::getLogger()->logError("going to open midi port");
 
     // Then, at last, open midi default port
-    RtMidiIn::openPort( 0 );
+    RtMidiIn::openPort( 0, "MTC recv port");
 
 	if (!RtMidiIn::isPortOpen()){
-		CuemsLogger::getLogger()->logError("first try to open midi port failder, triying again");
-		RtMidiIn::openPort( 0 );
-
+		CuemsLogger::getLogger()->logError("first try to open midi port failed, trying again");
+		RtMidiIn::openPort( 0, "MTC recv port");
 	}
-
-
+    
+    clientStartTimestamp = ns_now();
 }
 
 //////////////////////////////////////////////////////////
@@ -158,12 +162,9 @@ void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *
 
 	// First of all just a small message time gap check
 	if ( deltatime > 0.10 )
-		mtcr->isTimecodeRunning.store(false);
+		isTimecodeRunning.store(false);
 	else 
-		mtcr->isTimecodeRunning.store(true);
-
-	// Then we note down the timestamp when last midi message arrived
-	mtcr->timecodeTimestamp = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
+		isTimecodeRunning.store(true);
 
     // So, we have a new mide message and we check whether it is time
     // information and in that case store it in our current frame and 
@@ -202,14 +203,9 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		}
 	}
 
-	// Each time we process a quarter we assume that the head is
-	// stil going on...
-	// TO DO : adjust for both directions
-	// 1/4 * 1000 milliseconds * (1 / framerate)
-	mtcHead.store(mtcHead.load() + 250 / curFrame.getFps());
-
-    // Updateing lastDataByte flag
-    lastDataByte = dataByte;
+	// Calculate expected quarter frame count for sequence validation
+	int n = msgType >> 4; // 0 - 7
+	int expected_qf_count = (-1 == direction ? QF_LEN - n : 1 + n);
 
 	switch(msgType) {
 		case 0x00: // frame LSB
@@ -267,6 +263,19 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 			return;
 	}
 
+	// Anton: we should only update the head on valid quarter frames,
+	//        so I moved this section after the above switch.
+	// Each time we process a quarter we assume that the head is
+	// stil going on...
+	// TO DO : adjust for both directions
+	// 1/4 * 1000 milliseconds * (1 / framerate)
+	mtcHead.store(mtcHead.load() + static_cast<long int>(250 / curFrame.getFps()));
+
+	// Updating lastDataByte flag
+	lastDataByte = dataByte;
+
+	bool reset = (qfCount != expected_qf_count);
+
 	// Update time using the (hopefully) complete message
 	if(complete) {
 		// Add a 2 frames adjust to compensate the time 
@@ -279,7 +288,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// We have complete valid MTC time info so, we can update 
 		// our MTC head position
 		mtcHead.store(curFrame.toMilliseconds());
-		curFrameRate.store(curFrame.getFps());
+		curFrameRate.store(static_cast<unsigned char>(curFrame.getFps()));
 		wasLastUpdateFullFrame = false; // Quarter-frame update (not full SYSEX)
 
 		// Reset quarter frame structure and detection flags
@@ -287,6 +296,41 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		direction = 0;
 		qfCount = 0;
 		lastQFlag = firstQFlag = false;
+	}
+
+	// Note down the timestamp when the last QFrame message arrived
+	timecodeTimestamp = ns_now();
+
+	// W_MAX controls maximum averaging length.
+	// Higher values give better accuracy but slower adaptation.
+	constexpr const double W_MAX = 100.0;
+	long int ts_start = timecodeTimestamp - mtcHead.load() * static_cast<long int>(1e6);
+
+	// Reset accumulated average if time jumps or quarter frame sequence is broken
+	if (reset || (ts_start - timecodeStartTimestamp > 20e6) || (0.0 == timecodeRunWeight)) {
+		timecodeStartTimestamp = ts_start;
+		if (complete) {
+			timecodeRunWeight = 1.0;
+
+			std::cout << std::fixed << std::setprecision(3);
+			std::cout << "MTC Receiver: set start time: "
+				<< (ts_start - clientStartTimestamp) * 1e-9
+				<< std::endl;
+		}
+		else {
+			if (0 < timecodeRunWeight) {
+				std::cout << std::fixed << std::setprecision(3);
+				std::cout << "MTC Receiver: reset start time (QFrame): "
+					<< (ts_start - clientStartTimestamp) * 1e-9
+					<< std::endl;
+			}
+			timecodeRunWeight = 0.0;
+		}
+	}
+	else {
+		// Regular correction
+		timecodeRunWeight += (1 - timecodeRunWeight / W_MAX);
+		timecodeStartTimestamp += static_cast<long int>((ts_start - timecodeStartTimestamp) / timecodeRunWeight);
 	}
 }
 
@@ -298,11 +342,16 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 	curFrame.seconds = (int)(message[7]);
 	curFrame.frames = (int)(message[8]);
 
-	// A full message is always valid qhole MTC time info so
+	// A full message is always valid whole MTC time info so
 	// we can update our MTC head position
 	wasLastUpdateFullFrame = true; // Full SYSEX frame marker (like xjadeo's tick=0)
-	                                // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
 	mtcHead.store(curFrame.toMilliseconds());
+
+	// Reset the averaging for the new position
+	timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
+	timecodeRunWeight = 0.0;
+	std::cout << "MTC Receiver: Reset start time (FFrame): "
+		<< (timecodeStartTimestamp - clientStartTimestamp) * 1e-9 << std::endl;
 }
 
 //////////////////////////////////////////////////////////
@@ -323,12 +372,33 @@ bool MtcReceiver::decodeNewMidiMessage( std::vector<unsigned char> &message ) {
 }
 
 //////////////////////////////////////////////////////////
+bool MtcReceiver::isTimecodeActive() const
+{
+	if (0.0 == timecodeRunWeight) {
+		return false;
+	}
+	// Check if we got a quarter frame in less than 50 ms
+	return (std::abs(ns_now() - timecodeTimestamp) < 50e6);
+}
+
+//////////////////////////////////////////////////////////
+long int MtcReceiver::estimatedCurrentHead() const
+{
+	// If MTC was stopped with FFrame or reset, return the last position
+	if (0.0 == timecodeRunWeight) {
+		return mtcHead.load();
+	}
+	// Otherwise return extrapolated time (we have to convert ns to ms below)
+	return static_cast<long int>((ns_now() - timecodeStartTimestamp) * 1e-6);
+}
+
+//////////////////////////////////////////////////////////
 void MtcReceiver::threadedChecker( void ) {
 	while ( checkerOn ) {
 		if ( isTimecodeRunning.load() ) {
-			long int timecodeNow = chrono::duration_cast<chrono::nanoseconds>(chrono::high_resolution_clock::now().time_since_epoch()).count();
+			long int timecodeNow = ns_now();
 			
-			long int timecodeDiff =  (timecodeNow - timecodeTimestamp) / 1E6;
+			long int timecodeDiff = (timecodeNow - timecodeTimestamp) / static_cast<long int>(1E6);
 
 			if ( timecodeDiff > 50 )
 				isTimecodeRunning.store(false);
@@ -337,4 +407,3 @@ void MtcReceiver::threadedChecker( void ) {
 		std::this_thread::sleep_for( std::chrono::milliseconds(20) );
 	}
 }
-

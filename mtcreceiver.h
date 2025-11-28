@@ -151,6 +151,10 @@ class MtcReceiver : public RtMidiIn
         // Returns the current timecode frame structure (h, m, s, f, rate)
         static MtcFrame getCurFrame();
 
+        // New versions of head position tracking with filtering and extrapolation
+        bool isTimecodeActive() const;
+        long int estimatedCurrentHead() const;
+
     private:
         // MIDI TIMECODE DATA
         // ofxMidiTimecode timecode;        // Timecode message parser
@@ -162,6 +166,10 @@ class MtcReceiver : public RtMidiIn
         int qfCount = 0;                    // Quarters count
         bool firstQFlag = false;            // First quarter received flag
         bool lastQFlag = false;             // Last quarter received flag
+
+        long int timecodeStartTimestamp = 0;
+        long int clientStartTimestamp = 0;
+        double timecodeRunWeight = 0.0;
 
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );
