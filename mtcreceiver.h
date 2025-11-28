@@ -154,6 +154,13 @@ class MtcReceiver : public RtMidiIn
         // New versions of head position tracking with filtering and extrapolation
         bool isTimecodeActive() const;
         long int estimatedCurrentHead() const;
+        
+        // Network configuration: adjust timeouts for network transport (rtpmidid)
+        // Default values are fine for local MIDI, increase for network
+        static void setNetworkMode(bool enabled);  // Sets recommended timeouts for network
+        static void setActiveTimeout(long int ms);  // Timeout for isTimecodeActive() (default: 50ms)
+        static void setRunningTimeout(double seconds);  // Timeout for isTimecodeRunning (default: 0.1s)
+        static void setJumpThreshold(long int ms);  // Threshold for averaging reset (default: 20ms)
 
     private:
         // MIDI TIMECODE DATA
@@ -170,6 +177,11 @@ class MtcReceiver : public RtMidiIn
         long int timecodeStartTimestamp = 0;
         long int clientStartTimestamp = 0;
         double timecodeRunWeight = 0.0;
+        
+        // Configurable timeouts for network transport
+        static long int activeTimeoutNs;      // Default: 50ms (50e6 ns)
+        static double runningTimeoutSec;      // Default: 0.1 seconds
+        static long int jumpThresholdNs;      // Default: 20ms (20e6 ns)
 
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );

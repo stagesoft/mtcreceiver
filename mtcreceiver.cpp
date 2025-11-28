@@ -38,6 +38,11 @@ std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 bool MtcReceiver::wasLastUpdateFullFrame = false;
 MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
 
+// Configurable timeouts - defaults are for local MIDI
+long int MtcReceiver::activeTimeoutNs = 50000000L;    // 50ms
+double MtcReceiver::runningTimeoutSec = 0.10;         // 100ms
+long int MtcReceiver::jumpThresholdNs = 20000000L;    // 20ms
+
 // Helper function - use steady_clock for monotonic time
 static long int ns_now() {
   return chrono::duration_cast<chrono::nanoseconds>(
@@ -162,7 +167,8 @@ void MtcReceiver::midiCallback( double deltatime, std::vector< unsigned char > *
     std::vector< unsigned char > message = *m;
 
 	// First of all just a small message time gap check
-	if ( deltatime > 0.10 )
+	// Use configurable timeout for network transport compatibility
+	if ( deltatime > runningTimeoutSec )
 		isTimecodeRunning.store(false);
 	else 
 		isTimecodeRunning.store(true);
@@ -308,7 +314,8 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	long int ts_start = timecodeTimestamp - mtcHead.load() * static_cast<long int>(1e6);
 
 	// Reset accumulated average if time jumps or quarter frame sequence is broken
-	if (reset || (ts_start - timecodeStartTimestamp > 20e6) || (0.0 == timecodeRunWeight)) {
+	// Use configurable threshold for network transport compatibility
+	if (reset || (ts_start - timecodeStartTimestamp > jumpThresholdNs) || (0.0 == timecodeRunWeight)) {
 		timecodeStartTimestamp = ts_start;
 		if (complete) {
 			timecodeRunWeight = 1.0;
@@ -378,8 +385,9 @@ bool MtcReceiver::isTimecodeActive() const
 	if (0.0 == timecodeRunWeight) {
 		return false;
 	}
-	// Check if we got a quarter frame in less than 50 ms
-	return (std::abs(ns_now() - timecodeTimestamp) < 50e6);
+	// Check if we got a quarter frame within the configured timeout
+	// Use configurable timeout for network transport compatibility
+	return (std::abs(ns_now() - timecodeTimestamp) < activeTimeoutNs);
 }
 
 //////////////////////////////////////////////////////////
@@ -399,12 +407,43 @@ void MtcReceiver::threadedChecker( void ) {
 		if ( isTimecodeRunning.load() ) {
 			long int timecodeNow = ns_now();
 			
-			long int timecodeDiff = (timecodeNow - timecodeTimestamp) / static_cast<long int>(1E6);
+			long int timecodeDiff = (timecodeNow - timecodeTimestamp);
 
-			if ( timecodeDiff > 50 )
+			// Use configurable timeout (convert to ns for comparison)
+			if ( timecodeDiff > activeTimeoutNs )
 				isTimecodeRunning.store(false);
 		}
 
 		std::this_thread::sleep_for( std::chrono::milliseconds(20) );
 	}
+}
+
+//////////////////////////////////////////////////////////
+// Network configuration setters
+void MtcReceiver::setNetworkMode(bool enabled) {
+	if (enabled) {
+		// Recommended settings for network transport (rtpmidid)
+		activeTimeoutNs = 150000000L;    // 150ms - accounts for network jitter
+		runningTimeoutSec = 0.20;        // 200ms - more tolerant of gaps
+		jumpThresholdNs = 50000000L;     // 50ms - network can cause larger jumps
+		std::cout << "MTC Receiver: Network mode enabled (150ms timeout, 50ms jump threshold)" << std::endl;
+	} else {
+		// Default settings for local MIDI
+		activeTimeoutNs = 50000000L;     // 50ms
+		runningTimeoutSec = 0.10;        // 100ms
+		jumpThresholdNs = 20000000L;     // 20ms
+		std::cout << "MTC Receiver: Local mode (50ms timeout, 20ms jump threshold)" << std::endl;
+	}
+}
+
+void MtcReceiver::setActiveTimeout(long int ms) {
+	activeTimeoutNs = ms * 1000000L;
+}
+
+void MtcReceiver::setRunningTimeout(double seconds) {
+	runningTimeoutSec = seconds;
+}
+
+void MtcReceiver::setJumpThreshold(long int ms) {
+	jumpThresholdNs = ms * 1000000L;
 }
