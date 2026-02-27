@@ -2,7 +2,9 @@
  * SPDX-License-Identifier: LGPL-3.0-or-later
  *
  * Copyright (C) 2020-2026 Stage Lab Coop.
- * Author: Ion Reguera <ion@stagelab.coop>
+ * Authors:
+ *   Alex Ramos <alex@stagelab.coop>
+ *   Ion Reguera <ion@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
