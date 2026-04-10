@@ -48,6 +48,14 @@
 #include <iostream>
 #include <iomanip>
 #include <rtmidi/RtMidi.h>
+
+// RtMidi API compatibility: newer versions rename LINUX_ALSA -> LINUX_ALSA_SEQ
+// Adjust the version threshold below when the rename lands in a released version.
+#if defined(RTMIDI_VERSION_MAJOR) && RTMIDI_VERSION_MAJOR >= 7
+  static constexpr RtMidi::Api MTCRECV_DEFAULT_API = RtMidi::LINUX_ALSA_SEQ;
+#else
+  static constexpr RtMidi::Api MTCRECV_DEFAULT_API = RtMidi::LINUX_ALSA;
+#endif
 #ifdef HAVE_CUEMS_LOGGER
 #include "../cuemslogger/cuemslogger.h"
 #include "../cuems_errors.h"
@@ -136,7 +144,7 @@ struct MtcFrame {
 class MtcReceiver : public RtMidiIn
 {
     public:
-        MtcReceiver(    RtMidi::Api api = LINUX_ALSA,
+        MtcReceiver(    RtMidi::Api api = MTCRECV_DEFAULT_API,
                         const std::string& clientName = "Cuems Mtc Receiver",
                         unsigned int queueSizeLimit = 100 );
         ~MtcReceiver( void );
