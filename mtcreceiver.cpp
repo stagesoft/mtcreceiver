@@ -5,6 +5,7 @@
  * Authors:
  *   Alex Ramos <alex@stagelab.coop>
  *   Ion Reguera <ion@stagelab.coop>
+ *   Adrià Masip <adria@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
@@ -39,6 +40,7 @@ std::atomic<long int> MtcReceiver::mtcHead(0);
 std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
 bool MtcReceiver::wasLastUpdateFullFrame = false;
 MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
+std::function<void(long)> MtcReceiver::onQuarterFrame = nullptr;
 
 // Configurable timeouts - defaults are for local MIDI
 long int MtcReceiver::activeTimeoutNs = 50000000L;    // 50ms
@@ -58,9 +60,10 @@ MtcFrame MtcReceiver::getCurFrame() {
 }
 
 //////////////////////////////////////////////////////////
-MtcReceiver::MtcReceiver( 	RtMidi::Api api, 
+MtcReceiver::MtcReceiver( 	RtMidi::Api api,
 							const std::string& clientName,
-							unsigned int queueSizeLimit) :
+							unsigned int queueSizeLimit,
+							unsigned int portIndex) :
 							RtMidiIn( api, clientName, queueSizeLimit ) {
     // Check for midi ports available
     if ( RtMidiIn::getPortCount() == 0 ) {
@@ -80,12 +83,12 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
     RtMidiIn::ignoreTypes( false, false, false );
 	CuemsLogger::getLogger()->logInfo("going to open midi port");
 
-    // Then, at last, open midi default port
-    RtMidiIn::openPort( 0, "MTC recv port");
+    // Then, at last, open midi port (portIndex selects which port to use)
+    RtMidiIn::openPort( portIndex, "MTC recv port");
 
 	if (!RtMidiIn::isPortOpen()){
 		CuemsLogger::getLogger()->logWarning("first try to open midi port failed, trying again");
-		RtMidiIn::openPort( 0, "MTC recv port");
+		RtMidiIn::openPort( portIndex, "MTC recv port");
 	}
     
     clientStartTimestamp = ns_now();
@@ -279,6 +282,7 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	// TO DO : adjust for both directions
 	// 1/4 * 1000 milliseconds * (1 / framerate)
 	mtcHead.store(mtcHead.load() + static_cast<long int>(250 / curFrame.getFps()));
+	if (onQuarterFrame) onQuarterFrame(mtcHead.load()); // Site 1: per-quarter running update
 
 	// Updating lastDataByte flag
 	lastDataByte = dataByte;
@@ -294,9 +298,10 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// Our current frame is the current quarter frame structure
 		curFrame = quarterFrame;
 
-		// We have complete valid MTC time info so, we can update 
+		// We have complete valid MTC time info so, we can update
 		// our MTC head position
 		mtcHead.store(curFrame.toMilliseconds());
+		if (onQuarterFrame) onQuarterFrame(mtcHead.load()); // Site 2: per-complete-frame decode
 		curFrameRate.store(static_cast<unsigned char>(curFrame.getFps()));
 		wasLastUpdateFullFrame = false; // Quarter-frame update (not full SYSEX)
 

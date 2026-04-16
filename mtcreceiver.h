@@ -5,6 +5,7 @@
  * Authors:
  *   Alex Ramos <alex@stagelab.coop>
  *   Ion Reguera <ion@stagelab.coop>
+ *   Adrià Masip <adria@stagelab.coop>
  *
  * This file is part of cuems-videocomposer.
  *
@@ -41,6 +42,7 @@
 #define QF_LEN 8
 
 #include <atomic>
+#include <functional>
 #include <thread>
 #include <math.h>
 #include <chrono>
@@ -146,8 +148,14 @@ class MtcReceiver : public RtMidiIn
     public:
         MtcReceiver(    RtMidi::Api api = MTCRECV_DEFAULT_API,
                         const std::string& clientName = "Cuems Mtc Receiver",
-                        unsigned int queueSizeLimit = 100 );
+                        unsigned int queueSizeLimit = 100,
+                        unsigned int portIndex = 0 );
         ~MtcReceiver( void );
+
+        // Quarter-frame tick callback. Fires after every mtcHead update in
+        // decodeQuarterFrame(). Null-checked before invocation.
+        // MUST be lock-free — fires from the MIDI callback thread.
+        static std::function<void(long)> onQuarterFrame;
 
         // Stream control vars
         // These are accessed from both MIDI and audio callback threads, so must be atomic
