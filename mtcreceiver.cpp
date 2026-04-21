@@ -34,6 +34,7 @@
 #include "mtcreceiver.h"
 
 #include <cstdio>
+#include <stdexcept>
 
 ////////////////////////////////////////////
 // Initializing static class members
@@ -131,8 +132,7 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
     // Check for midi ports available
     if ( RtMidiIn::getPortCount() == 0 ) {
 		CuemsLogger::getLogger()->logError("No midi ports found.");
-
-        exit(CUEMS_EXIT_NO_MIDI_PORTS_FOUND);
+        throw std::runtime_error("MtcReceiver: no MIDI ports available");
     }
 
 	// Set and detach our threaded checker loop
