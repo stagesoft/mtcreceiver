@@ -43,6 +43,7 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <math.h>
 #include <chrono>
@@ -152,21 +153,71 @@ class MtcReceiver : public RtMidiIn
                         unsigned int portIndex = 0 );
         ~MtcReceiver( void );
 
-        // Quarter-frame tick callback. Fires after every mtcHead update in
-        // decodeQuarterFrame(). Null-checked before invocation.
-        // MUST be lock-free — fires from the MIDI callback thread.
-        static std::function<void(long)> onQuarterFrame;
+        // Quarter-frame tick callback signature.
+        //   mtcHeadMs       — current MTC head in ms (extrapolated on QFs 1-7,
+        //                     authoritative on QF 8 after full decode).
+        //   isCompleteFrame — true only on QF 8 when the full frame has just
+        //                     been decoded; false on QFs 1-7 (extrapolated).
+        // Fires at most once per valid quarter frame. Does NOT fire when the
+        // QF sequence is invalid (reset). The callback MUST be lock-free and
+        // non-blocking (<100 µs) — it runs on the RtMidi MIDI callback thread.
+        // Callers MUST NOT call setTickCallback() from within the handler.
+        using TickCallback = std::function<void(long mtcHeadMs, bool isCompleteFrame)>;
+
+        // Register (or clear, with an empty/null callable) the tick callback.
+        // Thread-safe: blocks until any in-flight invocation returns, so after
+        // this call returns with an empty callable the previous callback is
+        // guaranteed to never fire again (no-call-after-unregister).
+        static void setTickCallback(TickCallback cb);
+
+#ifdef MTCRECV_TESTING
+        // Test-only helper: synthesize a tick as if decodeQuarterFrame() had
+        // just invoked the registered callback. Gated behind MTCRECV_TESTING
+        // so production consumers cannot call it. Acquires the same mutex the
+        // MIDI thread would, so it also exercises the thread-safety path.
+        static void invokeTickForTesting(long mtcHeadMs, bool isCompleteFrame);
+
+        // Tag type used to select the test-only constructor that skips both
+        // the port-count check and openPort(), so unit tests can drive the
+        // decoder without requiring real MIDI hardware.
+        struct SkipPortOpenTag {};
+        explicit MtcReceiver(SkipPortOpenTag,
+                             RtMidi::Api api = MTCRECV_DEFAULT_API,
+                             const std::string& clientName = "Cuems Mtc Receiver Test",
+                             unsigned int queueSizeLimit = 100);
+
+        // Public forwarders for the private decode entry points, gated behind
+        // MTCRECV_TESTING so production consumers can't accidentally drive the
+        // decoder from outside. Used by the unit tests to feed synthetic MIDI
+        // byte sequences.
+        void decodeQuarterFrameForTesting(std::vector<unsigned char>& msg) {
+            decodeQuarterFrame(msg);
+        }
+        void decodeFullFrameForTesting(std::vector<unsigned char>& msg) {
+            decodeFullFrame(msg);
+        }
+
+        // Reset all per-instance decoder state (direction, qfCount, flags, the
+        // running quarterFrame buffer, and the active-state averaging). Lets
+        // each test start from a known state without constructing a new
+        // receiver.
+        void resetDecoderStateForTesting();
+
+        // Clear the static callback + curFrame state that persists across
+        // MtcReceiver instances. Call this from test SetUp to isolate tests.
+        static void resetStaticStateForTesting();
+#endif
 
         // Stream control vars
         // These are accessed from both MIDI and audio callback threads, so must be atomic
         static std::atomic<bool> isTimecodeRunning;      // Is the timecode sync running?
         static std::atomic<long int> mtcHead;              // Time code head in milliseconds
         static std::atomic<unsigned char> curFrameRate;  // Current MTC frame rate
-        static bool wasLastUpdateFullFrame; // true if last update was full SYSEX frame (for seeking)
+        static std::atomic<bool> wasLastUpdateFullFrame; // true if last update was full SYSEX frame (for seeking)
                                            // TODO: Use this in cuems-audioplayer and cuems-dmxplayer for accurate seeking
-        
-        // Get current MTC frame (like xjadeo's timecode state)
-        // Returns the current timecode frame structure (h, m, s, f, rate)
+
+        // Get current MTC frame (like xjadeo's timecode state). Returns a
+        // consistent snapshot (h, m, s, f, rate) taken under curFrameMutex_.
         static MtcFrame getCurFrame();
 
         // New versions of head position tracking with filtering and extrapolation
@@ -195,11 +246,29 @@ class MtcReceiver : public RtMidiIn
         long int timecodeStartTimestamp = 0;
         long int clientStartTimestamp = 0;
         double timecodeRunWeight = 0.0;
-        
+
+        // Protects the three instance members above (timecodeTimestamp,
+        // timecodeStartTimestamp, timecodeRunWeight). Mutable so that the
+        // const query methods (isTimecodeActive, estimatedCurrentHead) can
+        // acquire it.
+        mutable std::mutex activeStateMutex_;
+
         // Configurable timeouts for network transport
         static long int activeTimeoutNs;      // Default: 50ms (50e6 ns)
         static double runningTimeoutSec;      // Default: 0.1 seconds
         static long int jumpThresholdNs;      // Default: 20ms (20e6 ns)
+
+        // Global callback registration state. tickCallback_ is mutated under
+        // callbackMutex_; the mutex is also held during invocation so an
+        // unregister call waits for any in-flight callback to return before
+        // returning itself (no-call-after-unregister guarantee).
+        static std::mutex callbackMutex_;
+        static TickCallback tickCallback_;
+
+        // Protects reads/writes of the static curFrame (written in
+        // decodeQuarterFrame and decodeFullFrame from the MIDI thread, read
+        // via getCurFrame() from any thread).
+        static std::mutex curFrameMutex_;
 
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );
