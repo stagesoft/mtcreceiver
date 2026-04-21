@@ -33,14 +33,19 @@
 
 #include "mtcreceiver.h"
 
+#include <cstdio>
+
 ////////////////////////////////////////////
 // Initializing static class members
 std::atomic<bool> MtcReceiver::isTimecodeRunning(false);
 std::atomic<long int> MtcReceiver::mtcHead(0);
 std::atomic<unsigned char> MtcReceiver::curFrameRate(25);
-bool MtcReceiver::wasLastUpdateFullFrame = false;
+std::atomic<bool> MtcReceiver::wasLastUpdateFullFrame(false);
 MtcFrame MtcReceiver::curFrame;  // Initialize static curFrame
-std::function<void(long)> MtcReceiver::onQuarterFrame = nullptr;
+
+std::mutex MtcReceiver::callbackMutex_;
+MtcReceiver::TickCallback MtcReceiver::tickCallback_;
+std::mutex MtcReceiver::curFrameMutex_;
 
 // Configurable timeouts - defaults are for local MIDI
 long int MtcReceiver::activeTimeoutNs = 50000000L;    // 50ms
@@ -54,10 +59,68 @@ static long int ns_now() {
 }
 
 //////////////////////////////////////////////////////////
-// Get current MTC frame (like xjadeo's timecode state)
+// Get current MTC frame (like xjadeo's timecode state).
+// Returns a consistent snapshot taken under curFrameMutex_.
 MtcFrame MtcReceiver::getCurFrame() {
+    std::lock_guard<std::mutex> lk(curFrameMutex_);
     return curFrame;
 }
+
+//////////////////////////////////////////////////////////
+// Register (or clear) the quarter-frame tick callback.
+// Holding callbackMutex_ during assignment serializes with the MIDI thread's
+// invocation path, so on return (with an empty callable) the previous
+// callback is guaranteed to have finished and will not fire again.
+void MtcReceiver::setTickCallback(TickCallback cb) {
+    std::lock_guard<std::mutex> lk(callbackMutex_);
+    tickCallback_ = std::move(cb);
+}
+
+#ifdef MTCRECV_TESTING
+void MtcReceiver::invokeTickForTesting(long mtcHeadMs, bool isCompleteFrame) {
+    std::lock_guard<std::mutex> lk(callbackMutex_);
+    if (tickCallback_) tickCallback_(mtcHeadMs, isCompleteFrame);
+}
+
+// Test-only ctor: initialize the RtMidi backend but do NOT open any port and
+// do NOT start the checker thread. The decoder can be driven directly via
+// decodeQuarterFrameForTesting / decodeFullFrameForTesting.
+MtcReceiver::MtcReceiver(SkipPortOpenTag,
+                         RtMidi::Api api,
+                         const std::string& clientName,
+                         unsigned int queueSizeLimit) :
+    RtMidiIn(api, clientName, queueSizeLimit) {
+    clientStartTimestamp = ns_now();
+}
+
+void MtcReceiver::resetDecoderStateForTesting() {
+    quarterFrame = MtcFrame();
+    direction = 0;
+    lastDataByte = 0x00;
+    qfCount = 0;
+    firstQFlag = false;
+    lastQFlag = false;
+    std::lock_guard<std::mutex> lk(activeStateMutex_);
+    timecodeTimestamp = 0;
+    timecodeStartTimestamp = 0;
+    timecodeRunWeight = 0.0;
+}
+
+void MtcReceiver::resetStaticStateForTesting() {
+    {
+        std::lock_guard<std::mutex> lk(callbackMutex_);
+        tickCallback_ = TickCallback{};
+    }
+    {
+        std::lock_guard<std::mutex> lk(curFrameMutex_);
+        curFrame = MtcFrame();
+    }
+    isTimecodeRunning.store(false);
+    mtcHead.store(0);
+    curFrameRate.store(25);
+    wasLastUpdateFullFrame.store(false);
+}
+#endif
 
 //////////////////////////////////////////////////////////
 MtcReceiver::MtcReceiver( 	RtMidi::Api api,
@@ -281,29 +344,34 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 	// stil going on...
 	// TO DO : adjust for both directions
 	// 1/4 * 1000 milliseconds * (1 / framerate)
-	mtcHead.store(mtcHead.load() + static_cast<long int>(250 / curFrame.getFps()));
-	if (onQuarterFrame) onQuarterFrame(mtcHead.load()); // Site 1: per-quarter running update
-
-	// Updating lastDataByte flag
 	lastDataByte = dataByte;
 
 	bool reset = (qfCount != expected_qf_count);
 
-	// Update time using the (hopefully) complete message
-	if(complete) {
-		// Add a 2 frames adjust to compensate the time 
+	// Extrapolated head advance, used when the frame isn't yet complete.
+	// curFrame.getFps() is safe to read here without the mutex: this thread
+	// is the only writer, and readers of curFrame already go through the
+	// locked getCurFrame() path.
+	mtcHead.store(mtcHead.load() + static_cast<long int>(250 / curFrame.getFps()));
+	long int callbackMs = mtcHead.load();
+
+	// Update time using the (hopefully) complete message.
+	if (complete) {
+		// Add a 2 frames adjust to compensate the time
 		// it takes to receive all 8 QF messages
 		quarterFrame.frames += 2;
 
-		// Our current frame is the current quarter frame structure
-		curFrame = quarterFrame;
+		{
+			std::lock_guard<std::mutex> lk(curFrameMutex_);
+			curFrame = quarterFrame;
+		}
 
 		// We have complete valid MTC time info so, we can update
-		// our MTC head position
-		mtcHead.store(curFrame.toMilliseconds());
-		if (onQuarterFrame) onQuarterFrame(mtcHead.load()); // Site 2: per-complete-frame decode
+		// our MTC head position to the authoritative value.
+		callbackMs = curFrame.toMilliseconds();
+		mtcHead.store(callbackMs);
 		curFrameRate.store(static_cast<unsigned char>(curFrame.getFps()));
-		wasLastUpdateFullFrame = false; // Quarter-frame update (not full SYSEX)
+		wasLastUpdateFullFrame.store(false); // Quarter-frame update (not full SYSEX)
 
 		// Reset quarter frame structure and detection flags
 		quarterFrame = MtcFrame();
@@ -312,61 +380,83 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		lastQFlag = firstQFlag = false;
 	}
 
-	// Note down the timestamp when the last QFrame message arrived
-	timecodeTimestamp = ns_now();
+	// Single fire per QF: one invocation carrying a flag that distinguishes
+	// extrapolated ticks (QFs 1-7) from the authoritative tick (QF 8 after
+	// full decode). Suppressed entirely when the QF sequence is invalid so
+	// consumers never see phantom ticks.
+	if (!reset) {
+		std::lock_guard<std::mutex> lk(callbackMutex_);
+		if (tickCallback_) tickCallback_(callbackMs, complete);
+	}
 
-	// W_MAX controls maximum averaging length.
-	// Higher values give better accuracy but slower adaptation.
-	constexpr const double W_MAX = 100.0;
-	long int ts_start = timecodeTimestamp - mtcHead.load() * static_cast<long int>(1e6);
+	// Note down the timestamp when the last QFrame message arrived, and run
+	// the averaging logic under activeStateMutex_ so const query methods
+	// (isTimecodeActive / estimatedCurrentHead) see a consistent snapshot.
+	{
+		std::lock_guard<std::mutex> lk(activeStateMutex_);
 
-	// Reset accumulated average if time jumps or quarter frame sequence is broken
-	// Use configurable threshold for network transport compatibility
-	if (reset || (ts_start - timecodeStartTimestamp > jumpThresholdNs) || (0.0 == timecodeRunWeight)) {
-		timecodeStartTimestamp = ts_start;
-		if (complete) {
-			timecodeRunWeight = 1.0;
+		timecodeTimestamp = ns_now();
 
-			std::cout << std::fixed << std::setprecision(3);
-			std::cout << "MTC Receiver: set start time: "
-				<< (ts_start - clientStartTimestamp) * 1e-9
-				<< std::endl;
+		// W_MAX controls maximum averaging length.
+		// Higher values give better accuracy but slower adaptation.
+		constexpr const double W_MAX = 100.0;
+		long int ts_start = timecodeTimestamp - mtcHead.load() * static_cast<long int>(1e6);
+
+		// Reset accumulated average if time jumps or quarter frame sequence is broken
+		// Use configurable threshold for network transport compatibility
+		if (reset || (ts_start - timecodeStartTimestamp > jumpThresholdNs) || (0.0 == timecodeRunWeight)) {
+			timecodeStartTimestamp = ts_start;
+			if (complete) {
+				timecodeRunWeight = 1.0;
+#ifdef MTCRECV_VERBOSE_DIAG
+				fprintf(stderr, "MTC Receiver: set start time: %.3f\n",
+					(ts_start - clientStartTimestamp) * 1e-9);
+#endif
+			}
+			else {
+#ifdef MTCRECV_VERBOSE_DIAG
+				if (0 < timecodeRunWeight) {
+					fprintf(stderr, "MTC Receiver: reset start time (QFrame): %.3f\n",
+						(ts_start - clientStartTimestamp) * 1e-9);
+				}
+#endif
+				timecodeRunWeight = 0.0;
+			}
 		}
 		else {
-			if (0 < timecodeRunWeight) {
-				std::cout << std::fixed << std::setprecision(3);
-				std::cout << "MTC Receiver: reset start time (QFrame): "
-					<< (ts_start - clientStartTimestamp) * 1e-9
-					<< std::endl;
-			}
-			timecodeRunWeight = 0.0;
+			// Regular correction
+			timecodeRunWeight += (1 - timecodeRunWeight / W_MAX);
+			timecodeStartTimestamp += static_cast<long int>((ts_start - timecodeStartTimestamp) / timecodeRunWeight);
 		}
-	}
-	else {
-		// Regular correction
-		timecodeRunWeight += (1 - timecodeRunWeight / W_MAX);
-		timecodeStartTimestamp += static_cast<long int>((ts_start - timecodeStartTimestamp) / timecodeRunWeight);
 	}
 }
 
 //////////////////////////////////////////////////////////
 void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
-	curFrame.hours = (int)(message[5] & 0x1F);
-	curFrame.rate = (int)((message[5] & 0x60) >> 5);
-	curFrame.minutes = (int)(message[6]);
-	curFrame.seconds = (int)(message[7]);
-	curFrame.frames = (int)(message[8]);
+	{
+		std::lock_guard<std::mutex> lk(curFrameMutex_);
+		curFrame.hours = (int)(message[5] & 0x1F);
+		curFrame.rate = (int)((message[5] & 0x60) >> 5);
+		curFrame.minutes = (int)(message[6]);
+		curFrame.seconds = (int)(message[7]);
+		curFrame.frames = (int)(message[8]);
+		mtcHead.store(curFrame.toMilliseconds());
+	}
 
 	// A full message is always valid whole MTC time info so
 	// we can update our MTC head position
-	wasLastUpdateFullFrame = true; // Full SYSEX frame marker (like xjadeo's tick=0)
-	mtcHead.store(curFrame.toMilliseconds());
+	wasLastUpdateFullFrame.store(true); // Full SYSEX frame marker (like xjadeo's tick=0)
 
 	// Reset the averaging for the new position
-	timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
-	timecodeRunWeight = 0.0;
-	std::cout << "MTC Receiver: Reset start time (FFrame): "
-		<< (timecodeStartTimestamp - clientStartTimestamp) * 1e-9 << std::endl;
+	{
+		std::lock_guard<std::mutex> lk(activeStateMutex_);
+		timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
+		timecodeRunWeight = 0.0;
+#ifdef MTCRECV_VERBOSE_DIAG
+		fprintf(stderr, "MTC Receiver: Reset start time (FFrame): %.3f\n",
+			(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
+#endif
+	}
 }
 
 //////////////////////////////////////////////////////////
@@ -389,6 +479,7 @@ bool MtcReceiver::decodeNewMidiMessage( std::vector<unsigned char> &message ) {
 //////////////////////////////////////////////////////////
 bool MtcReceiver::isTimecodeActive() const
 {
+	std::lock_guard<std::mutex> lk(activeStateMutex_);
 	if (0.0 == timecodeRunWeight) {
 		return false;
 	}
@@ -400,6 +491,7 @@ bool MtcReceiver::isTimecodeActive() const
 //////////////////////////////////////////////////////////
 long int MtcReceiver::estimatedCurrentHead() const
 {
+	std::lock_guard<std::mutex> lk(activeStateMutex_);
 	// If MTC was stopped with FFrame or reset, return the last position
 	if (0.0 == timecodeRunWeight) {
 		return mtcHead.load();
@@ -413,8 +505,12 @@ void MtcReceiver::threadedChecker( void ) {
 	while ( checkerOn ) {
 		if ( isTimecodeRunning.load() ) {
 			long int timecodeNow = ns_now();
-			
-			long int timecodeDiff = (timecodeNow - timecodeTimestamp);
+			long int ts;
+			{
+				std::lock_guard<std::mutex> lk(activeStateMutex_);
+				ts = timecodeTimestamp;
+			}
+			long int timecodeDiff = (timecodeNow - ts);
 
 			// Use configurable timeout (convert to ns for comparison)
 			if ( timecodeDiff > activeTimeoutNs )
@@ -433,13 +529,17 @@ void MtcReceiver::setNetworkMode(bool enabled) {
 		activeTimeoutNs = 150000000L;    // 150ms - accounts for network jitter
 		runningTimeoutSec = 0.20;        // 200ms - more tolerant of gaps
 		jumpThresholdNs = 50000000L;     // 50ms - network can cause larger jumps
-		std::cout << "MTC Receiver: Network mode enabled (150ms timeout, 50ms jump threshold)" << std::endl;
+#ifdef MTCRECV_VERBOSE_DIAG
+		fprintf(stderr, "MTC Receiver: Network mode enabled (150ms timeout, 50ms jump threshold)\n");
+#endif
 	} else {
 		// Default settings for local MIDI
 		activeTimeoutNs = 50000000L;     // 50ms
 		runningTimeoutSec = 0.10;        // 100ms
 		jumpThresholdNs = 20000000L;     // 20ms
-		std::cout << "MTC Receiver: Local mode (50ms timeout, 20ms jump threshold)" << std::endl;
+#ifdef MTCRECV_VERBOSE_DIAG
+		fprintf(stderr, "MTC Receiver: Local mode (50ms timeout, 20ms jump threshold)\n");
+#endif
 	}
 }
 
