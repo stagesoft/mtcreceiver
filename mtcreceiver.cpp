@@ -203,7 +203,7 @@ void MtcFrame::fromSeconds( long int s ) {
 
 //////////////////////////////////////////////////////////
 long int MtcFrame::msToFrames( long int ms ) {
-	return ( ms / ( getFps() / 1000.0) );
+	return (long int)(ms * (getFps() / 1000.0));
 }
 
 //////////////////////////////////////////////////////////
