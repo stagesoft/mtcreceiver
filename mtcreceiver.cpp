@@ -194,13 +194,11 @@ long int MtcFrame::toMilliseconds() const {
 
 //////////////////////////////////////////////////////////
 void MtcFrame::fromSeconds( long int s ) {
-	seconds = (int)s % 60;
-	minutes = (int)( (s - seconds) * (1 / 60) ) % 60;
-	hours = (int)(s * (1 / 3600) ) % 60;
-
-	// round fractional part of seconds for ms
-	long int ms = (int)(floor((s - floor(s)) * 1000.0) + 0.5);
-	frames = msToFrames(ms);
+	// `s` is whole seconds, so no fractional component to convert into frames.
+	seconds = (int)(s % 60);
+	minutes = (int)((s / 60) % 60);
+	hours   = (int)((s / 3600) % 24);
+	frames  = 0;
 }
 
 //////////////////////////////////////////////////////////
