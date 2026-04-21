@@ -34,6 +34,7 @@
 #include "mtcreceiver.h"
 
 #include <cstdio>
+#include <stdexcept>
 
 ////////////////////////////////////////////
 // Initializing static class members
@@ -131,8 +132,7 @@ MtcReceiver::MtcReceiver( 	RtMidi::Api api,
     // Check for midi ports available
     if ( RtMidiIn::getPortCount() == 0 ) {
 		CuemsLogger::getLogger()->logError("No midi ports found.");
-
-        exit(CUEMS_EXIT_NO_MIDI_PORTS_FOUND);
+        throw std::runtime_error("MtcReceiver: no MIDI ports available");
     }
 
 	// Set and detach our threaded checker loop
@@ -194,18 +194,16 @@ long int MtcFrame::toMilliseconds() const {
 
 //////////////////////////////////////////////////////////
 void MtcFrame::fromSeconds( long int s ) {
-	seconds = (int)s % 60;
-	minutes = (int)( (s - seconds) * (1 / 60) ) % 60;
-	hours = (int)(s * (1 / 3600) ) % 60;
-
-	// round fractional part of seconds for ms
-	long int ms = (int)(floor((s - floor(s)) * 1000.0) + 0.5);
-	frames = msToFrames(ms);
+	// `s` is whole seconds, so no fractional component to convert into frames.
+	seconds = (int)(s % 60);
+	minutes = (int)((s / 60) % 60);
+	hours   = (int)((s / 3600) % 24);
+	frames  = 0;
 }
 
 //////////////////////////////////////////////////////////
 long int MtcFrame::msToFrames( long int ms ) {
-	return ( ms / ( getFps() / 1000.0) );
+	return (long int)(ms * (getFps() / 1000.0));
 }
 
 //////////////////////////////////////////////////////////
@@ -457,6 +455,16 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 			(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
 #endif
 	}
+
+	// A full frame is a seek / resync: any in-flight quarter-frame sequence
+	// is now stale. Clear the decoder state so the next QF stream starts
+	// fresh — otherwise direction / qfCount / firstQFlag / lastQFlag leak
+	// from before the seek and invalidate the sequence-validity check.
+	quarterFrame = MtcFrame();
+	direction = 0;
+	qfCount = 0;
+	lastQFlag = firstQFlag = false;
+	lastDataByte = 0x00;
 }
 
 //////////////////////////////////////////////////////////
