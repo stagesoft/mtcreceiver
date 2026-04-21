@@ -455,6 +455,16 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 			(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
 #endif
 	}
+
+	// A full frame is a seek / resync: any in-flight quarter-frame sequence
+	// is now stale. Clear the decoder state so the next QF stream starts
+	// fresh — otherwise direction / qfCount / firstQFlag / lastQFlag leak
+	// from before the seek and invalidate the sequence-validity check.
+	quarterFrame = MtcFrame();
+	direction = 0;
+	qfCount = 0;
+	lastQFlag = firstQFlag = false;
+	lastDataByte = 0x00;
 }
 
 //////////////////////////////////////////////////////////
