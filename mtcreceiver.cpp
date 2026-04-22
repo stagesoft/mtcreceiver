@@ -355,10 +355,6 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 
 	// Update time using the (hopefully) complete message.
 	if (complete) {
-		// Add a 2 frames adjust to compensate the time
-		// it takes to receive all 8 QF messages
-		quarterFrame.frames += 2;
-
 		{
 			std::lock_guard<std::mutex> lk(curFrameMutex_);
 			curFrame = quarterFrame;
