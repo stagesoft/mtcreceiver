@@ -51,6 +51,20 @@ target_include_directories(test_no_plus_two_compensation PRIVATE
     ${RTMIDI_INCLUDE_DIRS}
 )
 
+add_executable(test_24h_continuity test_24h_continuity.cpp)
+target_link_libraries(test_24h_continuity
+    PRIVATE
+    mtcreceiver
+    GTest::gtest_main
+    ${RTMIDI_LIBRARIES}
+    pthread
+)
+target_include_directories(test_24h_continuity PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${RTMIDI_INCLUDE_DIRS}
+)
+
 include(GoogleTest)
 gtest_discover_tests(test_callback)
 gtest_discover_tests(test_no_plus_two_compensation)
+gtest_discover_tests(test_24h_continuity)

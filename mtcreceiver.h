@@ -231,6 +231,12 @@ class MtcReceiver : public RtMidiIn
         static void setRunningTimeout(double seconds);  // Timeout for isTimecodeRunning (default: 0.1s)
         static void setJumpThreshold(long int ms);  // Threshold for averaging reset (default: 20ms)
 
+        // Clear the accumulated 24h-wrap offset (call between projects / on
+        // transport reset to the top). Without this, a long-running process
+        // keeps its >24h offset across project reloads. Resets the offset AND
+        // the last-wire memory atomically. Safe to call from any thread.
+        static void resetWrapOffset();
+
     private:
         // MIDI TIMECODE DATA
         // ofxMidiTimecode timecode;        // Timecode message parser
@@ -269,6 +275,19 @@ class MtcReceiver : public RtMidiIn
         // decodeQuarterFrame and decodeFullFrame from the MIDI thread, read
         // via getCurFrame() from any thread).
         static std::mutex curFrameMutex_;
+
+        // 24h-wrap continuity accumulator (>24h support). mtcHead is made
+        // CONTINUOUS (= raw wire ms + wrapOffsetMs_) so all consumers
+        // (mtcHead, estimatedCurrentHead(), the QF tick callbackMs) survive the
+        // 24h wire wrap with no gap. lastWireMs_ holds the last AUTHORITATIVE
+        // raw wire ms (-1 = none yet). Both guarded by wrapStateMutex_, which is
+        // never nested inside curFrameMutex_ (see applyWrap()).
+        static long int wrapOffsetMs_;
+        static long int lastWireMs_;
+        static std::mutex wrapStateMutex_;
+        // Apply wrap detection to a raw wire head (ms); returns the continuous
+        // head. MIDI-thread only, authoritative frames only (not extrapolation).
+        static long int applyWrap(long int wireMs);
 
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );

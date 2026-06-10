@@ -35,6 +35,8 @@
 
 #include <cstdio>
 #include <stdexcept>
+#include <cstdlib>     // std::llabs — long-diff; <math.h> does not guarantee std::abs(long int)
+#include <algorithm>   // std::max
 
 ////////////////////////////////////////////
 // Initializing static class members
@@ -48,6 +50,15 @@ std::mutex MtcReceiver::callbackMutex_;
 MtcReceiver::TickCallback MtcReceiver::tickCallback_;
 std::mutex MtcReceiver::curFrameMutex_;
 
+// 24h-wrap continuity accumulator (>24h support). MIDI wire timecode wraps at
+// 24h (hours field 0-23); these keep mtcHead/estimatedCurrentHead/callbackMs
+// monotonic past 24h. Written from the RtMidi callback thread via applyWrap();
+// reset from any thread via resetWrapOffset(); both under wrapStateMutex_.
+long int MtcReceiver::wrapOffsetMs_ = 0;
+long int MtcReceiver::lastWireMs_ = -1;   // sentinel: no authoritative frame seen yet
+std::mutex MtcReceiver::wrapStateMutex_;
+static_assert(sizeof(long int) >= 8, "mtcreceiver 24h accumulator needs 64-bit long");
+
 // Configurable timeouts - defaults are for local MIDI
 long int MtcReceiver::activeTimeoutNs = 50000000L;    // 50ms
 double MtcReceiver::runningTimeoutSec = 0.10;         // 100ms
@@ -57,6 +68,51 @@ long int MtcReceiver::jumpThresholdNs = 20000000L;    // 20ms
 static long int ns_now() {
   return chrono::duration_cast<chrono::nanoseconds>(
       chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+//////////////////////////////////////////////////////////
+// 24h-wrap accumulator. Given the raw WIRE head in ms (0 .. ~86_399_999),
+// detect a 24h rollover or a transport reset and return the CONTINUOUS head
+// (wire + accumulated 24h offset). Mirrors the engine's
+// MtcListener._apply_24h_offset heuristic, in the ms domain (fps-independent:
+// 24h = 86_400_000 ms regardless of frame rate).
+//
+// Called ONLY on authoritative updates (complete quarter-frame and full frame),
+// NEVER on per-quarter-frame extrapolation. Detection keys off lastWireMs_,
+// which is always the raw WIRE value — never the extrapolated continuous head —
+// so a brief extrapolation overshoot past 86_400_000 cannot double-count a wrap.
+//
+// Lock order: acquires ONLY wrapStateMutex_. Callers MUST NOT hold
+// curFrameMutex_ when calling this (compute wireMs inside that lock, release,
+// then call applyWrap) — wrapStateMutex_ is never nested inside curFrameMutex_.
+long int MtcReceiver::applyWrap(long int wireMs) {
+    constexpr long int DAY_MS  = 86400000L;
+    constexpr long int HOUR_MS =  3600000L;
+    std::lock_guard<std::mutex> lk(wrapStateMutex_);
+    if (lastWireMs_ >= 0) {
+        long int delta = wireMs - lastWireMs_;
+        if (delta < -HOUR_MS) {                       // large backward jump
+            if (lastWireMs_ > DAY_MS - HOUR_MS) {     // prev was in the last hour of 24h
+                wrapOffsetMs_ += DAY_MS;              // → 24h ROLLOVER: accumulate
+            } else if (wireMs < HOUR_MS) {            // new pos near 0 (MANDATORY guard)
+                wrapOffsetMs_ = 0;                    // → transport RESET to top
+            }
+            // else: arbitrary mid-show backward scrub → leave offset unchanged
+        }
+    }
+    lastWireMs_ = wireMs;                             // unconditional (mirrors MtcListener)
+    return wireMs + wrapOffsetMs_;
+}
+
+//////////////////////////////////////////////////////////
+// Clear the accumulated 24h offset (e.g. between projects / on transport reset).
+// Resets BOTH wrapOffsetMs_ and lastWireMs_ atomically — zeroing only the offset
+// would make the next authoritative frame see a huge negative delta vs the stale
+// lastWireMs_ and falsely add another 24h.
+void MtcReceiver::resetWrapOffset() {
+    std::lock_guard<std::mutex> lk(wrapStateMutex_);
+    wrapOffsetMs_ = 0;
+    lastWireMs_ = -1;
 }
 
 //////////////////////////////////////////////////////////
@@ -120,6 +176,7 @@ void MtcReceiver::resetStaticStateForTesting() {
     mtcHead.store(0);
     curFrameRate.store(25);
     wasLastUpdateFullFrame.store(false);
+    resetWrapOffset();   // clear 24h accumulator (wrapOffsetMs_ + lastWireMs_)
 }
 #endif
 
@@ -361,8 +418,12 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		}
 
 		// We have complete valid MTC time info so, we can update
-		// our MTC head position to the authoritative value.
-		callbackMs = curFrame.toMilliseconds();
+		// our MTC head position to the authoritative value. Route it through
+		// the 24h-wrap accumulator so mtcHead — and this callbackMs, which
+		// drives the tick callback (fade engine) at :383 — stay CONTINUOUS past
+		// the 24h wire wrap. curFrameMutex_ is NOT held here (its scope ended
+		// above) so applyWrap()'s wrapStateMutex_ is not nested inside it.
+		callbackMs = applyWrap(curFrame.toMilliseconds());
 		mtcHead.store(callbackMs);
 		curFrameRate.store(static_cast<unsigned char>(curFrame.getFps()));
 		wasLastUpdateFullFrame.store(false); // Quarter-frame update (not full SYSEX)
@@ -427,6 +488,15 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 
 //////////////////////////////////////////////////////////
 void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
+	// Capture the continuous head BEFORE overwriting it, to classify this full
+	// frame as a resync (position unchanged) vs a real seek (position jump).
+	long int oldHead = mtcHead.load();
+
+	// Compute the raw wire head + fps INSIDE curFrameMutex_, then release it
+	// before calling applyWrap() — wrapStateMutex_ is never nested inside
+	// curFrameMutex_ (lock-order rule).
+	long int wireMs;
+	double fps;
 	{
 		std::lock_guard<std::mutex> lk(curFrameMutex_);
 		curFrame.hours = (int)(message[5] & 0x1F);
@@ -434,23 +504,43 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		curFrame.minutes = (int)(message[6]);
 		curFrame.seconds = (int)(message[7]);
 		curFrame.frames = (int)(message[8]);
-		mtcHead.store(curFrame.toMilliseconds());
+		wireMs = curFrame.toMilliseconds();
+		fps = curFrame.getFps();
 	}
 
-	// A full message is always valid whole MTC time info so
-	// we can update our MTC head position
+	// A full message is always valid whole MTC time info. Route through the
+	// 24h-wrap accumulator so mtcHead stays continuous past 24h.
+	long int continuousMs = applyWrap(wireMs);
+	mtcHead.store(continuousMs);
 	wasLastUpdateFullFrame.store(true); // Full SYSEX frame marker (like xjadeo's tick=0)
 
-	// Reset the averaging for the new position
-	{
+	// Position-aware resync handling. libmtcmaster (jitter_improvement) sends a
+	// periodic full frame (~every 2s) at the CURRENT position. A resync matches
+	// where the quarter-frames already advanced us; a real seek does not.
+	// Tolerance scales with the active-timeout so network extrapolation jitter
+	// doesn't misclassify a late resync as a seek (floored at ~2 frames for
+	// local mode). std::llabs — both operands are long int (NOT std::abs).
+	long int tolMs = std::max<long int>(
+		static_cast<long int>(2000.0 / (fps > 0.0 ? fps : 25.0)),
+		activeTimeoutNs * 8 / 10 / 1000000L);
+	bool isResync = std::llabs(continuousMs - oldHead) <= tolMs;
+
+	if (!isResync) {
+		// Real seek → reset the averaging for the new position (BOTH fields
+		// together under activeStateMutex_).
 		std::lock_guard<std::mutex> lk(activeStateMutex_);
 		timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
 		timecodeRunWeight = 0.0;
 #ifdef MTCRECV_VERBOSE_DIAG
-		fprintf(stderr, "MTC Receiver: Reset start time (FFrame): %.3f\n",
+		fprintf(stderr, "MTC Receiver: Reset start time (FFrame seek): %.3f\n",
 			(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
 #endif
 	}
+	// On a resync we INTENTIONALLY leave timecodeStartTimestamp and
+	// timecodeRunWeight untouched. Previously every full frame zeroed the
+	// weight → isTimecodeActive() flips false; with the ~2s periodic resync that
+	// would gate dmxplayer scene output off every 2s. Keeping them stable on a
+	// resync preserves isTimecodeActive()==true (intentional contract change).
 
 	// A full frame is a seek / resync: any in-flight quarter-frame sequence
 	// is now stale. Clear the decoder state so the next QF stream starts
