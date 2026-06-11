@@ -177,6 +177,12 @@ void MtcReceiver::resetStaticStateForTesting() {
     curFrameRate.store(25);
     wasLastUpdateFullFrame.store(false);
     resetWrapOffset();   // clear 24h accumulator (wrapOffsetMs_ + lastWireMs_)
+    // Restore the local-mode timeout defaults too — a test that bumped these
+    // (e.g. setNetworkMode/setActiveTimeout) must not bleed into later tests
+    // and mis-scale tolMs. (Plan 5 / audit)
+    activeTimeoutNs = 50000000L;     // 50ms
+    runningTimeoutSec = 0.10;        // 100ms
+    jumpThresholdNs = 20000000L;     // 20ms
 }
 #endif
 
@@ -523,7 +529,10 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 	long int tolMs = std::max<long int>(
 		static_cast<long int>(2000.0 / (fps > 0.0 ? fps : 25.0)),
 		activeTimeoutNs * 8 / 10 / 1000000L);
-	bool isResync = std::llabs(continuousMs - oldHead) <= tolMs;
+	// Strict `<`: at the exact-equality boundary (|delta| == tolMs, the 2-frame
+	// budget) classify as a SEEK (re-anchor averaging), the safer default when
+	// the QF extrapolation overshoot exactly equals the tolerance. (Plan 5 / audit)
+	bool isResync = std::llabs(continuousMs - oldHead) < tolMs;
 
 	if (!isResync) {
 		// Real seek → reset the averaging for the new position (BOTH fields
