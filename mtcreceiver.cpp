@@ -514,52 +514,84 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		fps = curFrame.getFps();
 	}
 
-	// A full message is always valid whole MTC time info. Route through the
-	// 24h-wrap accumulator so mtcHead stays continuous past 24h.
+	// A full message is always valid whole MTC time info. applyWrap() must run
+	// on EVERY full frame (its 24h accumulator has to see every wire value);
+	// whether we PUBLISH the result into mtcHead depends on the classification
+	// below.
 	long int continuousMs = applyWrap(wireMs);
-	mtcHead.store(continuousMs);
-	wasLastUpdateFullFrame.store(true); // Full SYSEX frame marker (like xjadeo's tick=0)
 
 	// Position-aware resync handling. libmtcmaster (jitter_improvement) sends a
 	// periodic full frame (~every 2s) at the CURRENT position. A resync matches
 	// where the quarter-frames already advanced us; a real seek does not.
-	// Tolerance scales with the active-timeout so network extrapolation jitter
-	// doesn't misclassify a late resync as a seek (floored at ~2 frames for
-	// local mode). std::llabs — both operands are long int (NOT std::abs).
+	//
+	// Tolerance floored at 5 frames: since Phase-2 (021b689) removed the +2
+	// spec compensation, the QF-assembled head structurally lags wire-MTC by a
+	// constant ~3 frames, so a periodic resync's |delta| sits at ~3 frames
+	// EVERY time. The old 2-frame floor (== the measured delta) tied and
+	// mis-classified every resync as a SEEK; 5 frames clears the structural lag
+	// with margin while staying far below any real seek (GO/loop/cue jumps are
+	// >> this). std::llabs — both operands are long int (NOT std::abs).
 	long int tolMs = std::max<long int>(
-		static_cast<long int>(2000.0 / (fps > 0.0 ? fps : 25.0)),
+		static_cast<long int>(5000.0 / (fps > 0.0 ? fps : 25.0)),
 		activeTimeoutNs * 8 / 10 / 1000000L);
-	// Strict `<`: at the exact-equality boundary (|delta| == tolMs, the 2-frame
-	// budget) classify as a SEEK (re-anchor averaging), the safer default when
-	// the QF extrapolation overshoot exactly equals the tolerance. (Plan 5 / audit)
-	bool isResync = std::llabs(continuousMs - oldHead) < tolMs;
 
-	if (!isResync) {
-		// Real seek → reset the averaging for the new position (BOTH fields
-		// together under activeStateMutex_).
+	// Cold-attach guard: a freshly started process (or one just after a broken
+	// QF sequence) has no live QF timebase yet — timecodeRunWeight==0 and
+	// mtcHead still defaults to 0. Without this gate the first full frame near
+	// TC 0 would land within tolMs of the stale 0 and be mis-called a resync,
+	// silently dropping the initial position (VC/audioplayer restart against an
+	// already-running project — exactly what a redeploy does). runWeight!=0 ⇒ we
+	// have a QF baseline to confirm against; otherwise treat the FF as an
+	// authoritative SEEK. (decodeQuarterFrame and decodeFullFrame run on the
+	// same MIDI thread, so this snapshot cannot race the QF writer.)
+	double runWeightSnapshot;
+	{
 		std::lock_guard<std::mutex> lk(activeStateMutex_);
-		timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
-		timecodeRunWeight = 0.0;
-#ifdef MTCRECV_VERBOSE_DIAG
-		fprintf(stderr, "MTC Receiver: Reset start time (FFrame seek): %.3f\n",
-			(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
-#endif
+		runWeightSnapshot = timecodeRunWeight;
 	}
-	// On a resync we INTENTIONALLY leave timecodeStartTimestamp and
-	// timecodeRunWeight untouched. Previously every full frame zeroed the
-	// weight → isTimecodeActive() flips false; with the ~2s periodic resync that
-	// would gate dmxplayer scene output off every 2s. Keeping them stable on a
-	// resync preserves isTimecodeActive()==true (intentional contract change).
+	bool isResync = (runWeightSnapshot != 0.0)
+		&& (std::llabs(continuousMs - oldHead) < tolMs);
 
-	// A full frame is a seek / resync: any in-flight quarter-frame sequence
-	// is now stale. Clear the decoder state so the next QF stream starts
-	// fresh — otherwise direction / qfCount / firstQFlag / lastQFlag leak
-	// from before the seek and invalidate the sequence-validity check.
-	quarterFrame = MtcFrame();
-	direction = 0;
-	qfCount = 0;
-	lastQFlag = firstQFlag = false;
-	lastDataByte = 0x00;
+	// Permanent low-volume evidence (~1 line / 2s): raw delta + verdict + gate.
+	fprintf(stderr, "MTC-RX: FullFrame delta=%ld tol=%ld runWeight=%.3f -> %s\n",
+		(long)(continuousMs - oldHead), (long)tolMs, runWeightSnapshot,
+		isResync ? "RESYNC(hold)" : "SEEK(store)");
+
+	if (isResync) {
+		// RESYNC: the continuous QF timebase is authoritative. Do NOT publish
+		// the full-frame value into mtcHead (publishing it is what caused the
+		// ~2s forward snap for raw-mtcHead readers — VC MIDISyncSource,
+		// audioplayer). Do NOT raise the full-frame marker (no downstream
+		// force-seek). Leave timecodeStartTimestamp / timecodeRunWeight and the
+		// in-flight quarter-frame decoder state untouched: playback is
+		// continuous, the QF sequence is NOT stale, and isTimecodeActive() must
+		// stay true across the periodic resync. curFrame was still updated above
+		// so the OSD shows true wire MTC. mtcHead stays on the ~3-frame-lagged
+		// QF timebase, which every consumer's pipeline-latency comp is built on.
+	} else {
+		// SEEK (or cold attach): publish the position and re-anchor the
+		// averaging. mtcHead.store MUST precede the timecodeStartTimestamp calc
+		// (which reads mtcHead). The in-flight QF sequence is now stale — clear
+		// the decoder state so the next QF stream starts fresh, otherwise
+		// direction / qfCount / firstQFlag / lastQFlag leak from before the seek
+		// and invalidate the sequence-validity check.
+		mtcHead.store(continuousMs);
+		wasLastUpdateFullFrame.store(true); // Full SYSEX marker (like xjadeo tick=0)
+		{
+			std::lock_guard<std::mutex> lk(activeStateMutex_);
+			timecodeStartTimestamp = ns_now() - mtcHead.load() * static_cast<long int>(1e6);
+			timecodeRunWeight = 0.0;
+#ifdef MTCRECV_VERBOSE_DIAG
+			fprintf(stderr, "MTC Receiver: Reset start time (FFrame seek): %.3f\n",
+				(timecodeStartTimestamp - clientStartTimestamp) * 1e-9);
+#endif
+		}
+		quarterFrame = MtcFrame();
+		direction = 0;
+		qfCount = 0;
+		lastQFlag = firstQFlag = false;
+		lastDataByte = 0x00;
+	}
 }
 
 //////////////////////////////////////////////////////////
