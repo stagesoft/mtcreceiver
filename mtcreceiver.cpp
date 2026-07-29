@@ -553,9 +553,18 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		&& (std::llabs(continuousMs - oldHead) < tolMs);
 
 	// Permanent low-volume evidence (~1 line / 2s): raw delta + verdict + gate.
-	fprintf(stderr, "MTC-RX: FullFrame delta=%ld tol=%ld runWeight=%.3f -> %s\n",
-		(long)(continuousMs - oldHead), (long)tolMs, runWeightSnapshot,
-		isResync ? "RESYNC(hold)" : "SEEK(store)");
+	// Routed through the logger (real CuemsLogger under HAVE_CUEMS_LOGGER, the
+	// journald-aware stub otherwise) so it carries PRIORITY=7 instead of being
+	// stamped info by systemd — at ~0.5 Hz this was 11k+ priority-6 journal
+	// lines/day that `cuems-logs -l`/`-e` could not filter.
+	{
+		char mtcRxDiag[128];
+		snprintf(mtcRxDiag, sizeof(mtcRxDiag),
+			"MTC-RX: FullFrame delta=%ld tol=%ld runWeight=%.3f -> %s",
+			(long)(continuousMs - oldHead), (long)tolMs, runWeightSnapshot,
+			isResync ? "RESYNC(hold)" : "SEEK(store)");
+		CuemsLogger::getLogger()->logDebug(mtcRxDiag);
+	}
 
 	if (isResync) {
 		// RESYNC: the continuous QF timebase is authoritative. Do NOT publish

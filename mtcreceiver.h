@@ -50,6 +50,7 @@
 #include <vector>
 #include <iostream>
 #include <iomanip>
+#include <cstdlib>
 #include <rtmidi/RtMidi.h>
 
 // RtMidi API compatibility: newer versions rename LINUX_ALSA -> LINUX_ALSA_SEQ
@@ -63,14 +64,28 @@
 #include "../cuemslogger/cuemslogger.h"
 #include "../cuems_errors.h"
 #else
-// Stub logger for standalone use
+// Stub logger for standalone use.
+//
+// Under systemd, plain stdout/stderr lines are stamped PRIORITY=6 (info)
+// regardless of severity, so `journalctl -p 4` / `cuems-logs -e` can never
+// surface them. journald DOES parse a leading sd-daemon-style "<N>" marker on
+// a journal stream (it strips it and stamps the real priority), and systemd
+// sets JOURNAL_STREAM in the environment exactly when stdout/stderr are wired
+// to the journal. So the stub prefixes "<N>" when running under the journal
+// and stays byte-identical to the old output on a terminal.
 namespace CuemsLogger {
     class Logger {
     public:
         static Logger* getLogger() { static Logger instance; return &instance; }
-        void logError(const std::string& msg) { std::cerr << "[ERROR] " << msg << std::endl; }
-        void logWarning(const std::string& msg) { std::cerr << "[WARNING] " << msg << std::endl; }
-        void logInfo(const std::string& msg) { std::cout << "[INFO] " << msg << std::endl; }
+        void logError(const std::string& msg)   { std::cerr << pfx("<3>") << "[ERROR] "   << msg << std::endl; }
+        void logWarning(const std::string& msg) { std::cerr << pfx("<4>") << "[WARNING] " << msg << std::endl; }
+        void logInfo(const std::string& msg)    { std::cout << pfx("<6>") << "[INFO] "    << msg << std::endl; }
+        void logDebug(const std::string& msg)   { std::cout << pfx("<7>") << "[DEBUG] "   << msg << std::endl; }
+    private:
+        static const char* pfx(const char* level) {
+            static const bool under_journal = (getenv("JOURNAL_STREAM") != nullptr);
+            return under_journal ? level : "";
+        }
     };
     // Static function to match cuemslogger API
     inline Logger* getLogger() { return Logger::getLogger(); }
