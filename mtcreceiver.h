@@ -73,14 +73,22 @@
 // sets JOURNAL_STREAM in the environment exactly when stdout/stderr are wired
 // to the journal. So the stub prefixes "<N>" when running under the journal
 // and stays byte-identical to the old output on a terminal.
+//
+// CUEMS_LOGGER_FALLBACK_STUB: shared guard with oscreceiver.h's identical
+// stub, so a TU that includes both headers without HAVE_CUEMS_LOGGER gets
+// exactly one definition. Keep the two stubs method-identical — whichever
+// header is included first wins.
+#ifndef CUEMS_LOGGER_FALLBACK_STUB
+#define CUEMS_LOGGER_FALLBACK_STUB
 namespace CuemsLogger {
     class Logger {
     public:
         static Logger* getLogger() { static Logger instance; return &instance; }
-        void logError(const std::string& msg)   { std::cerr << pfx("<3>") << "[ERROR] "   << msg << std::endl; }
-        void logWarning(const std::string& msg) { std::cerr << pfx("<4>") << "[WARNING] " << msg << std::endl; }
-        void logInfo(const std::string& msg)    { std::cout << pfx("<6>") << "[INFO] "    << msg << std::endl; }
-        void logDebug(const std::string& msg)   { std::cout << pfx("<7>") << "[DEBUG] "   << msg << std::endl; }
+        void logCritical(const std::string& msg) { std::cerr << pfx("<2>") << "[CRITICAL] " << msg << std::endl; }
+        void logError(const std::string& msg)    { std::cerr << pfx("<3>") << "[ERROR] "    << msg << std::endl; }
+        void logWarning(const std::string& msg)  { std::cerr << pfx("<4>") << "[WARNING] "  << msg << std::endl; }
+        void logInfo(const std::string& msg)     { std::cout << pfx("<6>") << "[INFO] "     << msg << std::endl; }
+        void logDebug(const std::string& msg)    { std::cout << pfx("<7>") << "[DEBUG] "    << msg << std::endl; }
     private:
         static const char* pfx(const char* level) {
             static const bool under_journal = (getenv("JOURNAL_STREAM") != nullptr);
@@ -90,6 +98,7 @@ namespace CuemsLogger {
     // Static function to match cuemslogger API
     inline Logger* getLogger() { return Logger::getLogger(); }
 }
+#endif // CUEMS_LOGGER_FALLBACK_STUB
 // Stub error code
 #define CUEMS_EXIT_NO_MIDI_PORTS_FOUND 1
 #endif
