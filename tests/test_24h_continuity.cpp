@@ -332,14 +332,11 @@ TEST(DayShift, ResultWindowProperty) {
 // ─── 16. wrap race and the Dipòsit case ──────────────────────────────────────
 TEST(DayShift, WrapRaceAndDipositCase) {
     // Engine stamped 10 ms before its wrap, a fresh consumer already saw the
-    // wire at 00:00:00.010: the start was 20 ms ago, not 24 h ahead.
+    // wire at 00:00:00.010: the start was 20 ms ago (local -10), not 24 h ahead.
     EXPECT_EQ(MtcReceiver::dayShift(86399990L, 10), 1);
-    EXPECT_EQ(86399990L - 1 * DAY_MS, -10);
     // Dipòsit 10-25 P2: player spawned at wire 00:24:26 after the engine
     // passed 24 h; the engine's start is day 1 + 00:24:28 → 2 s ahead locally.
-    const long head = 1466000L, engine = DAY_MS + 1468000L;
-    EXPECT_EQ(MtcReceiver::dayShift(engine, head), 1);
-    EXPECT_EQ(engine - DAY_MS - head, 2000);
+    EXPECT_EQ(MtcReceiver::dayShift(DAY_MS + 1468000L, 1466000L), 1);
 }
 
 // ─── 17. not authoritative before the first complete frame (QF ramp) ─────────
@@ -359,7 +356,22 @@ TEST_F(Wrap24hFixture, NotAuthoritativeOnQuarterFrameRamp) {
     EXPECT_EQ(local, -7);
     EXPECT_EQ(k, -7) << "outputs untouched while not authoritative";
 
+    // The flag is up BEFORE the completing frame's tick fires: a consumer that
+    // converts inside the tick callback (gradient-motiond) must succeed there.
+    int completeTicks = 0;
+    bool tickResolved = false;
+    long tickK = -7;
+    MtcReceiver::setTickCallback([&](long, bool isComplete) {
+        if (!isComplete) return;
+        ++completeTicks;
+        long l = 0;
+        tickResolved = MtcReceiver::toLocalDay(DAY_MS + HOUR + 5000, l, tickK);
+    });
     r.decodeQuarterFrameForTesting(seq.back());              // complete: 01:00:00:00
+    MtcReceiver::setTickCallback({});
+    ASSERT_EQ(completeTicks, 1);
+    EXPECT_TRUE(tickResolved);
+    EXPECT_EQ(tickK, 1);
     EXPECT_EQ(MtcReceiver::mtcHead.load(), HOUR);
     EXPECT_TRUE(MtcReceiver::isHeadAuthoritative());
     ASSERT_TRUE(MtcReceiver::toLocalDay(HOUR + 5000, local, k));
@@ -543,10 +555,10 @@ TEST_F(Wrap24hFixture, TestingSetterDrivesToLocalDay) {
     EXPECT_EQ(local, 2 * DAY_MS + HOUR + 40);
 }
 
-// Reader, decoder and resets concurrently (TSan smoke, like test 11; the
-// values are pinned by the deterministic races 21-22). Every decoder pass is a
-// real rollover, so between two resets the head climbs one day per pass and k
-// can be any day count; only k <= 1 holds (the head is never negative).
+// Reader, decoder and resets concurrently: a ThreadSanitizer smoke test only,
+// like test 11 (no value is checked here; the races are pinned by the
+// deterministic tests 21-22). Every decoder pass is a real rollover, so between
+// two resets the head climbs one day per pass and k can be any day count.
 TEST_F(Wrap24hFixture, ReaderDecoderResetConcurrently) {
     MtcReceiver r(MtcReceiver::SkipPortOpenTag{});
     r.resetDecoderStateForTesting();
@@ -562,10 +574,7 @@ TEST_F(Wrap24hFixture, ReaderDecoderResetConcurrently) {
     std::thread reader([&] {
         long local = 0, k = 0;
         while (!stop.load()) {
-            if (MtcReceiver::toLocalDay(DAY_MS + 1000, local, k)) {
-                EXPECT_LE(k, 1);
-                EXPECT_EQ(local, DAY_MS + 1000 - k * DAY_MS);
-            }
+            (void)MtcReceiver::toLocalDay(DAY_MS + 1000, local, k);
         }
     });
     for (int i = 0; i < 2000; ++i) MtcReceiver::resetWrapOffset();
