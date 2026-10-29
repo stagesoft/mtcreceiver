@@ -1,5 +1,6 @@
 /*
  * SPDX-License-Identifier: LGPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * Copyright (C) 2020-2026 Stage Lab Coop.
  * Authors:
@@ -230,6 +231,17 @@ class MtcReceiver : public RtMidiIn
         // Clear the static callback + curFrame state that persists across
         // MtcReceiver instances. Call this from test SetUp to isolate tests.
         static void resetStaticStateForTesting();
+
+        // Day-alignment hooks. setHeadAuthoritativeForTesting() forces the
+        // flag (consumer tests poke the public mtcHead directly).
+        // setPublishHookForTesting() runs a callable on the decoding thread
+        // between applyWrap() and the head publish of every authoritative
+        // frame; setReaderHookForTesting() runs one inside toLocalDay()
+        // between its head load and its reset-epoch re-check. Empty callable
+        // = off. Set them only while no other thread decodes or reads.
+        static void setHeadAuthoritativeForTesting(bool authoritative);
+        static void setPublishHookForTesting(std::function<void()> hook);
+        static void setReaderHookForTesting(std::function<void()> hook);
 #endif
 
         // Stream control vars
@@ -259,7 +271,40 @@ class MtcReceiver : public RtMidiIn
         // transport reset to the top). Without this, a long-running process
         // keeps its >24h offset across project reloads. Resets the offset AND
         // the last-wire memory atomically. Safe to call from any thread.
+        // Also clears the head-authoritative flag (see toLocalDay()).
         static void resetWrapOffset();
+
+        // Day alignment (Plans/2026-10-25-mtc-day-align-24h-wrap.md in
+        // cuems-RELATIONS). The engine stamps cue times in ITS OWN 24h-extended
+        // domain (the wraps it has seen since its last reset); mtcHead is
+        // extended by the wraps THIS process has seen (applyWrap()). The two
+        // day counts differ whenever the process was born after a wrap (a
+        // per-cue player spawned past 24h) or the two were reset at different
+        // moments. Convert every engine time into this process's day before
+        // comparing it with mtcHead — never move mtcHead itself.
+        static constexpr long int DAY_MS = 86400000L;
+
+        // k = floorDiv(engineMs - localHeadMs + DAY_MS/2, DAY_MS): the whole
+        // days to subtract from engineMs so that it lands in
+        // [localHeadMs - 12h, localHeadMs + 12h). Ties: +12h -> 1, -12h -> 0.
+        // Pure.
+        static long int dayShift(long int engineMs, long int localHeadMs);
+
+        // localMs = engineMs - k * DAY_MS, k = dayShift(engineMs, mtcHead).
+        // Returns false, outputs untouched, while the head is not
+        // authoritative: before this process's first complete frame (mtcHead
+        // is then a 0-70 ms quarter-frame ramp), after resetWrapOffset() until
+        // the next complete frame, or when a reset races this call. The caller
+        // keeps the raw value and tries again later. Lock-free and wait-free
+        // (atomic loads only): safe from an RT audio callback and from the
+        // tick callback. Contract: engineMs is within 12h of the current MTC
+        // in true time (in practice seconds).
+        static bool toLocalDay(long int engineMs, long int& localMs, long int& k);
+
+        // True once an authoritative frame (complete quarter-frame sequence or
+        // full-frame seek) was published since start or the last
+        // resetWrapOffset().
+        static bool isHeadAuthoritative();
 
     private:
         // MIDI TIMECODE DATA
@@ -312,6 +357,24 @@ class MtcReceiver : public RtMidiIn
         // Apply wrap detection to a raw wire head (ms); returns the continuous
         // head. MIDI-thread only, authoritative frames only (not extrapolation).
         static long int applyWrap(long int wireMs);
+
+        // Day-alignment publish state. headAuthoritative_ is raised together
+        // with an authoritative mtcHead store and cleared by resetWrapOffset(),
+        // both under wrapStateMutex_. wrapResetEpoch_ counts the resets so a
+        // lock-free reader can see one racing its head load (a bare flag
+        // misses reset + republish between its two loads).
+        static std::atomic<bool> headAuthoritative_;
+        static std::atomic<unsigned long> wrapResetEpoch_;
+        // Store an authoritative continuous head and raise the flag, unless
+        // resetWrapOffset() ran since `epoch` was read before applyWrap(): the
+        // head then belongs to the pre-reset domain, so it is stored as before
+        // but the flag stays down until the next authoritative frame.
+        // MIDI-thread only; callers MUST NOT hold curFrameMutex_.
+        static void publishHead(long int continuousMs, unsigned long epoch);
+#ifdef MTCRECV_TESTING
+        static std::function<void()> publishHookForTesting_;
+        static std::function<void()> readerHookForTesting_;
+#endif
 
         // Usefull functions
         bool decodeNewMidiMessage( std::vector<unsigned char> &message );

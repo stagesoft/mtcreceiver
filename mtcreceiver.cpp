@@ -1,5 +1,6 @@
 /*
  * SPDX-License-Identifier: LGPL-3.0-or-later
+ * SPDX-FileContributor: Ion Reguera <ion@stagelab.coop>
  *
  * Copyright (C) 2020-2026 Stage Lab Coop.
  * Authors:
@@ -59,6 +60,20 @@ long int MtcReceiver::lastWireMs_ = -1;   // sentinel: no authoritative frame se
 std::mutex MtcReceiver::wrapStateMutex_;
 static_assert(sizeof(long int) >= 8, "mtcreceiver 24h accumulator needs 64-bit long");
 
+// Day alignment: is mtcHead authoritative in the current wrap domain, and how
+// many resets so far (see toLocalDay()). toLocalDay() runs in RT callbacks, so
+// everything it loads must be lock-free.
+std::atomic<bool> MtcReceiver::headAuthoritative_(false);
+std::atomic<unsigned long> MtcReceiver::wrapResetEpoch_(0);
+static_assert(std::atomic<long int>::is_always_lock_free
+              && std::atomic<bool>::is_always_lock_free
+              && std::atomic<unsigned long>::is_always_lock_free,
+              "toLocalDay() must stay lock-free");
+#ifdef MTCRECV_TESTING
+std::function<void()> MtcReceiver::publishHookForTesting_;
+std::function<void()> MtcReceiver::readerHookForTesting_;
+#endif
+
 // Configurable timeouts - defaults are for local MIDI
 long int MtcReceiver::activeTimeoutNs = 50000000L;    // 50ms
 double MtcReceiver::runningTimeoutSec = 0.10;         // 100ms
@@ -86,7 +101,6 @@ static long int ns_now() {
 // curFrameMutex_ when calling this (compute wireMs inside that lock, release,
 // then call applyWrap) — wrapStateMutex_ is never nested inside curFrameMutex_.
 long int MtcReceiver::applyWrap(long int wireMs) {
-    constexpr long int DAY_MS  = 86400000L;
     constexpr long int HOUR_MS =  3600000L;
     std::lock_guard<std::mutex> lk(wrapStateMutex_);
     if (lastWireMs_ >= 0) {
@@ -109,10 +123,60 @@ long int MtcReceiver::applyWrap(long int wireMs) {
 // Resets BOTH wrapOffsetMs_ and lastWireMs_ atomically — zeroing only the offset
 // would make the next authoritative frame see a huge negative delta vs the stale
 // lastWireMs_ and falsely add another 24h.
+// mtcHead keeps its pre-reset value until the next authoritative frame, so the
+// head-authoritative flag drops here and the epoch tells a racing reader.
 void MtcReceiver::resetWrapOffset() {
     std::lock_guard<std::mutex> lk(wrapStateMutex_);
     wrapOffsetMs_ = 0;
     lastWireMs_ = -1;
+    headAuthoritative_.store(false);
+    wrapResetEpoch_.fetch_add(1);
+}
+
+//////////////////////////////////////////////////////////
+// Publish an authoritative continuous head (complete QF frame, full-frame
+// seek). Under wrapStateMutex_ so it cannot interleave with resetWrapOffset():
+// either the reset comes first and bumps the epoch (flag stays down), or it
+// comes after and lowers the flag we raise here.
+void MtcReceiver::publishHead(long int continuousMs, unsigned long epoch) {
+    std::lock_guard<std::mutex> lk(wrapStateMutex_);
+    mtcHead.store(continuousMs);
+    if (wrapResetEpoch_.load() == epoch) {
+        headAuthoritative_.store(true);
+    }
+}
+
+//////////////////////////////////////////////////////////
+// Day alignment: nearest whole day, floor division (C++ '/' truncates toward
+// zero, so step down once for a negative non-multiple).
+long int MtcReceiver::dayShift(long int engineMs, long int localHeadMs) {
+    const long int n = engineMs - localHeadMs + DAY_MS / 2;
+    long int k = n / DAY_MS;
+    if (n % DAY_MS < 0) --k;
+    return k;
+}
+
+//////////////////////////////////////////////////////////
+// Lock-free: epoch, flag, head, epoch. A flag seen up after the first epoch
+// load means a publish since the last reset, and the head loaded after it is
+// that publish or a later value in the same domain; an epoch change means a
+// reset raced the head load (possibly already republished, so the flag alone
+// cannot tell), so give up for now: the caller's next try sees the new state.
+bool MtcReceiver::toLocalDay(long int engineMs, long int& localMs, long int& k) {
+    const unsigned long epoch = wrapResetEpoch_.load();
+    if (!headAuthoritative_.load()) return false;
+    const long int head = mtcHead.load();
+#ifdef MTCRECV_TESTING
+    if (readerHookForTesting_) readerHookForTesting_();
+#endif
+    if (wrapResetEpoch_.load() != epoch) return false;
+    k = dayShift(engineMs, head);
+    localMs = engineMs - k * DAY_MS;
+    return true;
+}
+
+bool MtcReceiver::isHeadAuthoritative() {
+    return headAuthoritative_.load();
 }
 
 //////////////////////////////////////////////////////////
@@ -176,13 +240,27 @@ void MtcReceiver::resetStaticStateForTesting() {
     mtcHead.store(0);
     curFrameRate.store(25);
     wasLastUpdateFullFrame.store(false);
-    resetWrapOffset();   // clear 24h accumulator (wrapOffsetMs_ + lastWireMs_)
+    resetWrapOffset();   // clear 24h accumulator (wrapOffsetMs_ + lastWireMs_) + flag
+    publishHookForTesting_ = {};
+    readerHookForTesting_ = {};
     // Restore the local-mode timeout defaults too — a test that bumped these
     // (e.g. setNetworkMode/setActiveTimeout) must not bleed into later tests
     // and mis-scale tolMs. (Plan 5 / audit)
     activeTimeoutNs = 50000000L;     // 50ms
     runningTimeoutSec = 0.10;        // 100ms
     jumpThresholdNs = 20000000L;     // 20ms
+}
+
+void MtcReceiver::setHeadAuthoritativeForTesting(bool authoritative) {
+    headAuthoritative_.store(authoritative);
+}
+
+void MtcReceiver::setPublishHookForTesting(std::function<void()> hook) {
+    publishHookForTesting_ = std::move(hook);
+}
+
+void MtcReceiver::setReaderHookForTesting(std::function<void()> hook) {
+    readerHookForTesting_ = std::move(hook);
 }
 #endif
 
@@ -429,8 +507,14 @@ void MtcReceiver::decodeQuarterFrame(std::vector<unsigned char> &message) {
 		// drives the tick callback (fade engine) at :383 — stay CONTINUOUS past
 		// the 24h wire wrap. curFrameMutex_ is NOT held here (its scope ended
 		// above) so applyWrap()'s wrapStateMutex_ is not nested inside it.
+		// publishHead() stores mtcHead and raises the head-authoritative flag
+		// (toLocalDay()) unless a reset raced in since the epoch load.
+		const unsigned long epoch = wrapResetEpoch_.load();
 		callbackMs = applyWrap(curFrame.toMilliseconds());
-		mtcHead.store(callbackMs);
+#ifdef MTCRECV_TESTING
+		if (publishHookForTesting_) publishHookForTesting_();
+#endif
+		publishHead(callbackMs, epoch);
 		curFrameRate.store(static_cast<unsigned char>(curFrame.getFps()));
 		wasLastUpdateFullFrame.store(false); // Quarter-frame update (not full SYSEX)
 
@@ -518,7 +602,11 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 	// on EVERY full frame (its 24h accumulator has to see every wire value);
 	// whether we PUBLISH the result into mtcHead depends on the classification
 	// below.
+	const unsigned long epoch = wrapResetEpoch_.load();
 	long int continuousMs = applyWrap(wireMs);
+#ifdef MTCRECV_TESTING
+	if (publishHookForTesting_) publishHookForTesting_();
+#endif
 
 	// Position-aware resync handling. libmtcmaster (jitter_improvement) sends a
 	// periodic full frame (~every 2s) at the CURRENT position. A resync matches
@@ -577,6 +665,8 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		// stay true across the periodic resync. curFrame was still updated above
 		// so the OSD shows true wire MTC. mtcHead stays on the ~3-frame-lagged
 		// QF timebase, which every consumer's pipeline-latency comp is built on.
+		// Nor does it raise the head-authoritative flag: it relies on an earlier
+		// publish (after a resetWrapOffset() the next complete QF frame does it).
 	} else {
 		// SEEK (or cold attach): publish the position and re-anchor the
 		// averaging. mtcHead.store MUST precede the timecodeStartTimestamp calc
@@ -584,7 +674,7 @@ void MtcReceiver::decodeFullFrame(std::vector<unsigned char> &message) {
 		// the decoder state so the next QF stream starts fresh, otherwise
 		// direction / qfCount / firstQFlag / lastQFlag leak from before the seek
 		// and invalidate the sequence-validity check.
-		mtcHead.store(continuousMs);
+		publishHead(continuousMs, epoch);
 		wasLastUpdateFullFrame.store(true); // Full SYSEX marker (like xjadeo tick=0)
 		{
 			std::lock_guard<std::mutex> lk(activeStateMutex_);
